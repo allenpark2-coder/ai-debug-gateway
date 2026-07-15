@@ -75,6 +75,15 @@ func (r *Ring) Append(data []byte) {
 	r.total += n
 }
 
+// Len returns the current total number of bytes ever written, i.e.
+// the sequence number of the next byte Append will write. Passing it
+// as ReadAfter's `after` argument starts a read from "now" onward.
+func (r *Ring) Len() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.total
+}
+
 // ReadAfter returns up to max bytes of ring contents starting at
 // sequence `after`, or from the earliest retained sequence if `after`
 // has already been overwritten (Chunk.Gap is set in that case).

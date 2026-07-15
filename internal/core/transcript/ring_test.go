@@ -2,6 +2,21 @@ package transcript
 
 import "testing"
 
+func TestRingLenIsNextWriteSequence(t *testing.T) {
+	r := NewRing(8)
+	if r.Len() != 0 {
+		t.Fatalf("got %d, want 0", r.Len())
+	}
+	r.Append([]byte("123"))
+	if r.Len() != 3 {
+		t.Fatalf("got %d, want 3", r.Len())
+	}
+	c := r.ReadAfter(r.Len(), 8)
+	if len(c.Data) != 0 || c.Gap {
+		t.Fatalf("reading from Len() must see nothing yet: %+v", c)
+	}
+}
+
 func TestRingReadAfterWraparoundReportsGap(t *testing.T) {
 	r := NewRing(8)
 	r.Append([]byte("123456"))
