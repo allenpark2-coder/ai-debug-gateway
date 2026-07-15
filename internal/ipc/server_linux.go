@@ -27,13 +27,18 @@ type Role int
 const (
 	RoleControl Role = iota
 	RoleAttach
+	RoleDiagnose
 )
 
 func (r Role) String() string {
-	if r == RoleAttach {
+	switch r {
+	case RoleAttach:
 		return "attach"
+	case RoleDiagnose:
+		return "diagnose"
+	default:
+		return "control"
 	}
-	return "control"
 }
 
 // controlAllowed is the exact set of operations reachable on a control
@@ -51,11 +56,21 @@ var controlAllowed = map[string]bool{
 	v1.OpRecordsExport:  true,
 }
 
+var diagnoseAllowed = map[string]bool{
+	v1.OpSessionStatus:   true,
+	v1.OpOutputRead:      true,
+	v1.OpDiagnoseExecute: true,
+}
+
 func permitted(role Role, operation string) bool {
-	if role == RoleAttach {
+	switch role {
+	case RoleAttach:
 		return true
+	case RoleDiagnose:
+		return diagnoseAllowed[operation]
+	default:
+		return controlAllowed[operation]
 	}
-	return controlAllowed[operation]
 }
 
 // Dispatcher performs one already-permitted, already-version-checked
