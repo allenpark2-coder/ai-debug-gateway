@@ -167,3 +167,42 @@ all packages PASS, including internal/integration and internal/transport/ssh; ex
 ### Remaining-findings concerns
 
 - Procfs process `root` and `fd` aliases are intentionally denied as opaque alias boundaries, even when a particular invocation might resolve to a non-sensitive target. This preserves deny-by-default behavior without relying on runtime filesystem state.
+
+## Final pseudo-filesystem review fixes
+
+### Findings addressed
+
+- Replaced procfs/sysfs/devfs blacklist handling with a separate explicit pseudo-filesystem classifier. Direct reads allow only exact global procfs facts: `cpuinfo`, `meminfo`, `uptime`, `loadavg`, `version`, `filesystems`, and `mounts`.
+- Deny every per-process procfs operand and every other procfs node, including `/proc/kcore`; deny all direct `/sys` and `/dev` operands by default.
+- Allow user SSH public keys matching `.ssh/id_*.pub` while continuing to deny the corresponding private keys and `authorized_keys`.
+- Added a central informational-form validator that permits exactly one `--help` or `--version` argument for already allowlisted commands. Extra operands still go through the command-specific grammar and deny.
+
+### Final-review RED evidence
+
+Command:
+
+```text
+GOCACHE=/tmp/ai-debug-gateway-go-cache go test ./internal/policy -run 'TestCommonPolicy(AdversarialForms|AllowsExactDiagnosticForms)$' -v
+```
+
+The intended failures were observed for `/proc/kcore`, `/proc/123/status`, an arbitrary `/proc/sys` node, an arbitrary `/sys` node, `/dev/null`, `.ssh/id_ed25519.pub`, and exact `ps --help`, `cat --version`, and `ip --help` forms.
+
+### Final-review GREEN evidence
+
+Focused policy/core suite:
+
+```text
+GOCACHE=/tmp/ai-debug-gateway-go-cache go test ./internal/policy ./internal/core/...
+all packages PASS; exit status 0
+```
+
+Full repository suite:
+
+```text
+GOCACHE=/tmp/ai-debug-gateway-go-cache go test ./...
+all packages PASS; exit status 0
+```
+
+### Final-review concerns
+
+- The pseudo-filesystem allowlist is deliberately narrow. Safe platform-specific procfs/sysfs facts require a focused positive test and explicit addition; no pattern-based or per-process procfs reads are currently supported.
