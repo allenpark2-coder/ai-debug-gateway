@@ -25,6 +25,13 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/xdgpaths"
 )
 
+// version and commit are set at build time via -ldflags "-X main.version=... -X main.commit=..."
+// by scripts/build-release.sh; a plain `go build` leaves them at these defaults.
+var (
+	version = "dev"
+	commit  = "none"
+)
+
 type daemonOptions struct {
 	AutoReadonly    bool
 	UnsafeAutoShell string
@@ -152,6 +159,7 @@ func main() {
 }
 
 func run() error {
+	log.Printf("gatewayd: version=%s commit=%s", version, commit)
 	options, err := parseDaemonOptions(os.Args[1:])
 	if err != nil {
 		return err
