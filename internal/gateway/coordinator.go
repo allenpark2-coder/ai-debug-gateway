@@ -259,6 +259,46 @@ func (c *Coordinator) Result(transactionID string) (*command.Result, error) {
 	return c.commands.Result(transactionID)
 }
 
+// Takeover immediately ends the active transaction, if any, as
+// interrupted-by-user and restores normal human input. It always
+// succeeds, even when nothing is executing.
+func (c *Coordinator) Takeover() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.act == nil {
+		return nil
+	}
+	c.finishActiveLocked(command.StatusInterruptedByUser, nil)
+	if c.sess.State() == session.RunningCommand {
+		_ = c.sess.Apply(session.CommandResult)
+	}
+	return nil
+}
+
+// BeginSecret manually opens the secret redaction window: the local
+// `secret` command-mode operation, for a prompt no configured pattern
+// recognizes.
+func (c *Coordinator) BeginSecret() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.secretW.Begin()
+	if c.act != nil {
+		c.act.deadline = time.Now().Add(c.loginCfg.SecretGracePeriod)
+	}
+}
+
+// EndSecret manually ends the secret redaction window: the local
+// `secret-done` operation, used after the human inspects the live
+// console and confirms authentication completed.
+func (c *Coordinator) EndSecret() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.secretW.Finish()
+	if c.sess.State() == session.Authenticating {
+		_ = c.sess.Apply(session.Authenticated)
+	}
+}
+
 // Reject marks a pending proposal as rejected.
 func (c *Coordinator) Reject(proposalID string) error {
 	return c.commands.Reject(proposalID)
@@ -384,10 +424,24 @@ func (c *Coordinator) readLoop(stream transport.Stream) {
 	for {
 		n, err := stream.Read(buf)
 		if n > 0 {
-			chunk := append([]byte(nil), buf[:n]...)
-			c.ring.Append(chunk)
-			c.publish(chunk)
-			c.onData(chunk)
+			raw := append([]byte(nil), buf[:n]...)
+			// Redact before this chunk ever reaches the ring or a
+			// subscriber: onData below is what recognizes and opens
+			// the secret window, so checking Active() here, before
+			// onData runs, is what keeps an already-open window's
+			// echoed bytes out of durable stores and AI-visible
+			// output even for the very first chunk that arrives while
+			// it is active.
+			stored := raw
+			c.mu.Lock()
+			active := c.secretW.Active()
+			c.mu.Unlock()
+			if active {
+				stored = c.secretW.FilterTarget(raw)
+			}
+			c.ring.Append(stored)
+			c.publish(stored)
+			c.onData(raw)
 		}
 		if err != nil {
 			c.onReadError(stream, err)
