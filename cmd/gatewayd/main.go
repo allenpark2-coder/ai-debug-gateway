@@ -161,6 +161,7 @@ func run() error {
 	}
 
 	disp := newDispatcher(board, profileDir, coord, open, aw, tw, defaultLoginConfig(username))
+	disp.policy = diagnosticPolicy
 
 	drainStop := make(chan struct{})
 	go runTranscriptDrain(coord, tw, board, drainStop)

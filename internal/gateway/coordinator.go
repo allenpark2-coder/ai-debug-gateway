@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -21,9 +22,12 @@ var (
 	ErrNotReady               = errors.New("gateway: session is not READY")
 	ErrNotReconnecting        = errors.New("gateway: retry is only valid while RECONNECTING")
 	ErrHumanSelectionRequired = errors.New("gateway: automatic reconnect requires human device selection")
+	ErrCommandActive          = errors.New("gateway: a command is already active")
+	ErrResultWaiterLimit      = errors.New("gateway: too many result waiters")
 )
 
 const timeoutPollInterval = 25 * time.Millisecond
+const maxResultWaiterTransactions = 1024
 
 // Opener attempts to reopen the same physical device a session
 // started with. It must verify the device's identity and return
@@ -73,6 +77,11 @@ type activeTransaction struct {
 	startSeq uint64
 }
 
+type resultWaiter struct {
+	wake chan struct{}
+	refs int
+}
+
 // Coordinator wires one board's session, command, transcript, and
 // secret state to a transport.Stream. It serializes every state
 // mutation behind its own mutex: the transport read loop appends
@@ -104,6 +113,9 @@ type Coordinator struct {
 	aiSubs    []*subscriber
 
 	act *activeTransaction
+	// resultWaiters is protected by mu. Each transaction has one shared
+	// notification channel, closed only after its result is stored.
+	resultWaiters map[string]*resultWaiter
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -114,12 +126,13 @@ type Coordinator struct {
 // DISCONNECTED with a fresh session ID.
 func NewCoordinator(board string) *Coordinator {
 	c := &Coordinator{
-		board:    board,
-		sess:     session.NewMachine(id.New("sess")),
-		commands: command.NewStore(),
-		ring:     transcript.NewRing(1 << 20),
-		secretW:  secret.NewWindow(),
-		stopCh:   make(chan struct{}),
+		board:         board,
+		sess:          session.NewMachine(id.New("sess")),
+		commands:      command.NewStore(),
+		ring:          transcript.NewRing(1 << 20),
+		secretW:       secret.NewWindow(),
+		resultWaiters: make(map[string]*resultWaiter),
+		stopCh:        make(chan struct{}),
 	}
 	c.wg.Add(1)
 	go c.timeoutLoop()
@@ -129,6 +142,9 @@ func NewCoordinator(board string) *Coordinator {
 // Stop closes any active transport and stops background goroutines.
 func (c *Coordinator) Stop() {
 	c.mu.Lock()
+	if c.act != nil {
+		c.finishActiveLocked(command.StatusDaemonRestarted, nil)
+	}
 	if c.stream != nil {
 		c.stream.Close()
 	}
@@ -268,11 +284,6 @@ func (c *Coordinator) Propose(sessionID, text, purpose string, timeout time.Dura
 // completion marker to its command text on one shell line, and writes
 // it to the transport. The session must be READY.
 func (c *Coordinator) Approve(proposalID string) (*command.Transaction, error) {
-	tx, err := c.commands.Approve(proposalID)
-	if err != nil {
-		return nil, err
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -281,6 +292,16 @@ func (c *Coordinator) Approve(proposalID string) (*command.Transaction, error) {
 	}
 	if c.sess.State() != session.Ready {
 		return nil, ErrNotReady
+	}
+	if c.secretW.Active() {
+		return nil, ErrNotReady
+	}
+	if c.act != nil {
+		return nil, ErrCommandActive
+	}
+	tx, err := c.commands.Approve(proposalID)
+	if err != nil {
+		return nil, err
 	}
 
 	m := newMarker(tx.ID)
@@ -315,6 +336,51 @@ func (c *Coordinator) ConfirmSessionReady() error {
 // Result returns the recorded result for transactionID, if any.
 func (c *Coordinator) Result(transactionID string) (*command.Result, error) {
 	return c.commands.Result(transactionID)
+}
+
+// WaitResult waits without polling until transactionID has a terminal result.
+// Registration and the second result check share c.mu with terminal recording,
+// preventing completion between the check and registration from being missed.
+func (c *Coordinator) WaitResult(ctx context.Context, transactionID string) (*command.Result, error) {
+	if result, err := c.commands.Result(transactionID); err == nil {
+		return result, nil
+	} else if !errors.Is(err, command.ErrNotFound) {
+		return nil, err
+	}
+	c.mu.Lock()
+	if result, err := c.commands.Result(transactionID); err == nil {
+		c.mu.Unlock()
+		return result, nil
+	} else if !errors.Is(err, command.ErrNotFound) {
+		c.mu.Unlock()
+		return nil, err
+	}
+	waiter := c.resultWaiters[transactionID]
+	if waiter == nil {
+		if len(c.resultWaiters) >= maxResultWaiterTransactions {
+			c.mu.Unlock()
+			return nil, ErrResultWaiterLimit
+		}
+		waiter = &resultWaiter{wake: make(chan struct{})}
+		c.resultWaiters[transactionID] = waiter
+	}
+	waiter.refs++
+	c.mu.Unlock()
+
+	select {
+	case <-waiter.wake:
+		return c.commands.Result(transactionID)
+	case <-ctx.Done():
+		c.mu.Lock()
+		if c.resultWaiters[transactionID] == waiter {
+			waiter.refs--
+			if waiter.refs == 0 {
+				delete(c.resultWaiters, transactionID)
+			}
+		}
+		c.mu.Unlock()
+		return nil, ctx.Err()
+	}
 }
 
 // Takeover immediately ends the active transaction, if any, as
@@ -645,7 +711,12 @@ func (c *Coordinator) finishActiveLocked(status command.Status, exitCode *int) {
 		Duration:      time.Since(c.act.tx.ApprovedAt),
 		CompletedAt:   time.Now(),
 	}
+	res.Output = c.ring.ReadAfter(c.act.startSeq, 1<<20).Data
 	_ = c.commands.CompleteTransaction(res)
+	if waiter := c.resultWaiters[res.TransactionID]; waiter != nil {
+		delete(c.resultWaiters, res.TransactionID)
+		close(waiter.wake)
+	}
 	c.act = nil
 }
 
