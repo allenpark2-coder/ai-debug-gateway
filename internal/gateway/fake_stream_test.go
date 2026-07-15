@@ -21,8 +21,9 @@ type fakeStream struct {
 	close chan struct{}
 	once  sync.Once
 
-	writeMu sync.Mutex
-	written bytes.Buffer
+	writeMu  sync.Mutex
+	written  bytes.Buffer
+	writeErr error
 }
 
 func newFakeStream(identity transport.Identity) *fakeStream {
@@ -52,6 +53,9 @@ func (f *fakeStream) Read(p []byte) (int, error) {
 func (f *fakeStream) Write(p []byte) (int, error) {
 	f.writeMu.Lock()
 	defer f.writeMu.Unlock()
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
 	return f.written.Write(p)
 }
 

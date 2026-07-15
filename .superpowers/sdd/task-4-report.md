@@ -37,3 +37,17 @@ All completed with exit status 0. Focused tests cover policy rejection without w
 
 - Result output is capped to 64 KiB for diagnostic responses; output that exceeds the transcript ring is marked start-truncated, and response clipping marks end-truncated.
 - The diagnostic busy response currently uses the existing invalid-payload protocol error envelope because the protocol has no dedicated busy code.
+
+## Review follow-up
+
+Review identified that dispatcher-only serialization did not prevent manual coordinator operations or session lifecycle changes from observing/racing the short-lived diagnostic proposal. The follow-up moved the security boundary into `Coordinator.DiagnoseStart`: session/secret/active validation, proposal creation, approval, active installation, and transport write now share one coordinator critical section. All proposal mutation/list APIs also take that lock, so no pending diagnostic proposal is externally visible.
+
+Additional RED/GREEN coverage was added for concurrent manual approval versus diagnostic start, invalid session state without pending residue, immediate transport-write failure, waiter wakeup and exact `disconnected` result, exact ring-capacity truncation metadata, audit ordering, and write-failure open-set cleanup. Write failures now finalize and notify immediately, restore READY via the normal command-result transition, and still return the immutable transaction for consistent result auditing. Auto-readonly approval is audited only after a successful write/start.
+
+The transcript ring's real `Chunk.Gap` is preserved on `command.Result.OutputTruncatedStart`; the dispatcher no longer infers start truncation from output length, eliminating the exact-capacity false positive.
+
+Fresh review verification:
+
+- `GOCACHE=/tmp/ai-debug-gateway-go-cache go test -race ./internal/gateway ./cmd/gatewayd` — PASS
+- `GOCACHE=/tmp/ai-debug-gateway-go-cache go test ./...` — PASS
+- `git diff --check` — PASS

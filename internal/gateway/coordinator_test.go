@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/command"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/session"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
 )
 
@@ -64,6 +66,106 @@ func TestWaitResultCancellationRemovesWaiter(t *testing.T) {
 	c.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("leaked %d waiter entries", n)
+	}
+}
+
+func TestDiagnoseStartWriteFailureRecordsAndWakes(t *testing.T) {
+	c := newTestCoordinator(t)
+	stream := newFakeStream(transport.Identity{Kind: "ssh", Key: "x"})
+	if err := c.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	stream.writeErr = errors.New("write failed")
+	tx, err := c.DiagnoseStart(c.SessionID(), "uname -a", "kernel", time.Second)
+	if err == nil {
+		t.Fatal("expected write failure")
+	}
+	if tx == nil {
+		t.Fatal("approved transaction must be returned for terminal bookkeeping")
+	}
+	res, waitErr := c.WaitResult(context.Background(), tx.ID)
+	if waitErr != nil {
+		t.Fatal(waitErr)
+	}
+	if res.Status != command.StatusDisconnected {
+		t.Fatalf("status = %s", res.Status)
+	}
+	if c.State() != session.Ready {
+		t.Fatalf("state = %s", c.State())
+	}
+	if len(c.PendingForSession(c.SessionID())) != 0 {
+		t.Fatal("diagnostic proposal residue")
+	}
+}
+
+func TestDiagnoseStartRejectsStateWithoutPendingResidue(t *testing.T) {
+	c := newTestCoordinator(t)
+	if _, err := c.DiagnoseStart(c.SessionID(), "uname -a", "kernel", time.Second); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(c.PendingForSession(c.SessionID())) != 0 {
+		t.Fatal("diagnostic proposal residue")
+	}
+}
+
+func TestExactRingCapacityIsNotStartTruncated(t *testing.T) {
+	c := newTestCoordinator(t)
+	stream := newFakeStream(transport.Identity{Kind: "ssh", Key: "x"})
+	if err := c.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := c.DiagnoseStart(c.SessionID(), "uname -a", "kernel", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := c.activeMarker()
+	markerLine := []byte(fmt.Sprintf("GWMARK:%s:%s:0\n", tx.ID, m.nonce))
+	body := bytes.Repeat([]byte{'x'}, (1<<20)-len(markerLine))
+	for len(body) > 0 {
+		n := 4096
+		if n > len(body) {
+			n = len(body)
+		}
+		stream.feed(body[:n])
+		body = body[n:]
+	}
+	stream.feed(markerLine)
+	res, err := c.WaitResult(context.Background(), tx.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OutputTruncatedStart {
+		t.Fatal("exact ring capacity falsely marked start-truncated")
+	}
+}
+
+func TestManualApproveCannotRaceDiagnosticProposal(t *testing.T) {
+	c := newTestCoordinator(t)
+	stream := newFakeStream(transport.Identity{Kind: "ssh", Key: "x"})
+	if err := c.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	manual, err := c.Propose(c.SessionID(), "pwd", "manual", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() { <-start; _, err := c.Approve(manual.ID); errs <- err }()
+	go func() {
+		<-start
+		_, err := c.DiagnoseStart(c.SessionID(), "uname -a", "diagnostic", time.Second)
+		errs <- err
+	}()
+	close(start)
+	e1, e2 := <-errs, <-errs
+	if (e1 == nil) == (e2 == nil) {
+		t.Fatalf("errors = %v, %v; want exactly one start", e1, e2)
+	}
+	for _, p := range c.PendingForSession(c.SessionID()) {
+		if p.ID != manual.ID {
+			t.Fatalf("externally visible diagnostic residue: %+v", p)
+		}
 	}
 }
 

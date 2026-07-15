@@ -268,11 +268,10 @@ func (c *Coordinator) RetrySSH() error { return c.retry(true) }
 // Propose creates a new pending proposal.
 func (c *Coordinator) Propose(sessionID, text, purpose string, timeout time.Duration) (*command.Proposal, error) {
 	c.mu.Lock()
-	kind := c.transportKind
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 	return c.commands.Propose(command.Input{
 		SessionID: sessionID,
-		Transport: kind,
+		Transport: c.transportKind,
 		Board:     c.board,
 		Text:      text,
 		Purpose:   purpose,
@@ -286,23 +285,53 @@ func (c *Coordinator) Propose(sessionID, text, purpose string, timeout time.Dura
 func (c *Coordinator) Approve(proposalID string) (*command.Transaction, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if c.stream == nil {
-		return nil, ErrNotConnected
-	}
-	if c.sess.State() != session.Ready {
-		return nil, ErrNotReady
-	}
-	if c.secretW.Active() {
-		return nil, ErrNotReady
-	}
-	if c.act != nil {
-		return nil, ErrCommandActive
+	if err := c.canStartLocked(); err != nil {
+		return nil, err
 	}
 	tx, err := c.commands.Approve(proposalID)
 	if err != nil {
 		return nil, err
 	}
+	return c.startTransactionLocked(tx)
+}
+
+// DiagnoseStart atomically creates, approves, installs, and writes a diagnostic
+// transaction. The proposal is never observable while it is pending.
+func (c *Coordinator) DiagnoseStart(sessionID, text, purpose string, timeout time.Duration) (*command.Transaction, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.canStartLocked(); err != nil {
+		return nil, err
+	}
+	if sessionID != c.sess.SessionID() {
+		return nil, ErrNotReady
+	}
+	prop, err := c.commands.Propose(command.Input{SessionID: sessionID, Transport: c.transportKind, Board: c.board, Text: text, Purpose: purpose, Timeout: timeout})
+	if err != nil {
+		return nil, err
+	}
+	tx, err := c.commands.Approve(prop.ID)
+	if err != nil {
+		_ = c.commands.Reject(prop.ID)
+		return nil, err
+	}
+	return c.startTransactionLocked(tx)
+}
+
+func (c *Coordinator) canStartLocked() error {
+	if c.stream == nil {
+		return ErrNotConnected
+	}
+	if c.sess.State() != session.Ready || c.secretW.Active() {
+		return ErrNotReady
+	}
+	if c.act != nil {
+		return ErrCommandActive
+	}
+	return nil
+}
+
+func (c *Coordinator) startTransactionLocked(tx *command.Transaction) (*command.Transaction, error) {
 
 	m := newMarker(tx.ID)
 	c.act = &activeTransaction{
@@ -315,6 +344,10 @@ func (c *Coordinator) Approve(proposalID string) (*command.Transaction, error) {
 
 	line := tx.Text + m.shellSuffix() + "\n"
 	if _, werr := c.stream.Write([]byte(line)); werr != nil {
+		c.finishActiveLocked(command.StatusDisconnected, nil)
+		if c.sess.State() == session.RunningCommand {
+			_ = c.sess.Apply(session.CommandResult)
+		}
 		return tx, werr
 	}
 	return tx, nil
@@ -425,18 +458,24 @@ func (c *Coordinator) EndSecret() {
 
 // Reject marks a pending proposal as rejected.
 func (c *Coordinator) Reject(proposalID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.commands.Reject(proposalID)
 }
 
 // Edit replaces a pending proposal with a new one carrying text and
 // purpose; it does not approve or execute anything.
 func (c *Coordinator) Edit(proposalID, text, purpose string) (*command.Proposal, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.commands.Edit(proposalID, text, purpose)
 }
 
 // PendingForSession returns every currently pending proposal for
 // sessionID.
 func (c *Coordinator) PendingForSession(sessionID string) []*command.Proposal {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.commands.PendingForSession(sessionID)
 }
 
@@ -711,7 +750,9 @@ func (c *Coordinator) finishActiveLocked(status command.Status, exitCode *int) {
 		Duration:      time.Since(c.act.tx.ApprovedAt),
 		CompletedAt:   time.Now(),
 	}
-	res.Output = c.ring.ReadAfter(c.act.startSeq, 1<<20).Data
+	chunk := c.ring.ReadAfter(c.act.startSeq, 1<<20)
+	res.Output = chunk.Data
+	res.OutputTruncatedStart = chunk.Gap
 	_ = c.commands.CompleteTransaction(res)
 	if waiter := c.resultWaiters[res.TransactionID]; waiter != nil {
 		delete(c.resultWaiters, res.TransactionID)
