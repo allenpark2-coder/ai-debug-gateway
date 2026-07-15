@@ -27,6 +27,13 @@ const (
 	OpCommandList     = "command.list"
 	OpRecordsExport   = "records.export"
 	OpDiagnoseExecute = "diagnose.execute"
+	// OpUnsafeShellExecute is reachable only on a RoleUnsafeShell
+	// connection, itself created only when gatewayd is started with
+	// --unsafe-auto-shell for a board whose unsafe-shell file has been
+	// loaded. It is otherwise absent from the AI-capable control
+	// surface, same as approval and the other attach-only operations
+	// below.
+	OpUnsafeShellExecute = "unsafeshell.execute"
 
 	OpCommandApprove = "command.approve"
 	OpCommandReject  = "command.reject"

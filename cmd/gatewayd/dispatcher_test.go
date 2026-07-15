@@ -219,6 +219,193 @@ func TestDiagnoseWriteFailureReturnsTerminalResultAndConsistentAudit(t *testing.
 	}
 }
 
+func TestUnsafeShellRejectsWithoutProposalOrWrite(t *testing.T) {
+	d := newTestDispatcher(t)
+	d.unsafeShellPolicy = policy.Denylist(policy.DenylistRules{})
+	stream := newFakeCoordStream()
+	if err := d.coord.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	result, protoErr := d.Dispatch(ipc.RoleUnsafeShell, v1.Request{Operation: v1.OpUnsafeShellExecute,
+		Payload: mustJSON(t, unsafeShellExecutePayload{SessionID: d.coord.SessionID(), Text: "sh -c 'id'", Purpose: "test rejection", TimeoutMS: 100})})
+	if protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	got := result.(unsafeShellExecuteResult)
+	if got.Decision.Allowed {
+		t.Fatal("hard-denied command was allowed")
+	}
+	if len(stream.writtenSoFar()) != 0 {
+		t.Fatal("rejection wrote transport bytes")
+	}
+	if len(d.coord.PendingForSession(d.coord.SessionID())) != 0 {
+		t.Fatal("rejection created a proposal")
+	}
+}
+
+func TestUnsafeShellValidatesRequiredFieldsAndTimeoutBeforePolicyOrWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    unsafeShellExecutePayload
+	}{
+		{"empty session", unsafeShellExecutePayload{Text: "mount", Purpose: "p", TimeoutMS: 1}},
+		{"empty text", unsafeShellExecutePayload{SessionID: "s", Purpose: "p", TimeoutMS: 1}},
+		{"empty purpose", unsafeShellExecutePayload{SessionID: "s", Text: "mount", TimeoutMS: 1}},
+		{"zero", unsafeShellExecutePayload{SessionID: "s", Text: "mount", Purpose: "p"}},
+		{"negative", unsafeShellExecutePayload{SessionID: "s", Text: "mount", Purpose: "p", TimeoutMS: -1}},
+		{"too large", unsafeShellExecutePayload{SessionID: "s", Text: "mount", Purpose: "p", TimeoutMS: command.MaxDiagnosticTimeoutMS + 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDispatcher(t)
+			d.unsafeShellPolicy = policy.Denylist(policy.DenylistRules{})
+			stream := newFakeCoordStream()
+			if err := d.coord.StartSSH(stream, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, protoErr := d.Dispatch(ipc.RoleUnsafeShell, v1.Request{Operation: v1.OpUnsafeShellExecute, Payload: mustJSON(t, tc.p)})
+			if protoErr == nil || protoErr.Code != v1.ErrCodeInvalidPayload {
+				t.Fatalf("error = %v", protoErr)
+			}
+			if len(stream.writtenSoFar()) != 0 {
+				t.Fatal("invalid request wrote target bytes")
+			}
+			if len(d.coord.PendingForSession(d.coord.SessionID())) != 0 {
+				t.Fatal("invalid request created proposal")
+			}
+		})
+	}
+}
+
+func TestUnsafeShellExecutesAMutatingCommandAndReturnsOnlyTransactionOutput(t *testing.T) {
+	d := newTestDispatcher(t)
+	d.unsafeShellPolicy = policy.Denylist(policy.DenylistRules{})
+	stream := newFakeCoordStream()
+	if err := d.coord.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	stream.feedData([]byte("old-output\n"))
+	waitForCond(t, time.Second, func() bool { return bytes.Contains(d.coord.ReadAfter(0, 1024).Data, []byte("old-output")) })
+	done := make(chan any, 1)
+	go func() {
+		r, e := d.Dispatch(ipc.RoleUnsafeShell, v1.Request{Operation: v1.OpUnsafeShellExecute,
+			Payload: mustJSON(t, unsafeShellExecutePayload{SessionID: d.coord.SessionID(), Text: "mount -o remount,rw /", Purpose: "need rw", TimeoutMS: 1000})})
+		if e != nil {
+			done <- e
+			return
+		}
+		done <- r
+	}()
+	waitForCond(t, time.Second, func() bool { return bytes.Contains(stream.writtenSoFar(), []byte("GWMARK:")) })
+	written := string(stream.writtenSoFar())
+	parts := strings.Split(written, "GWMARK:")
+	marker := strings.Split(parts[1], ":")
+	stream.feedData([]byte("remounted\nGWMARK:" + marker[0] + ":" + marker[1] + ":0\n"))
+	select {
+	case raw := <-done:
+		got, ok := raw.(unsafeShellExecuteResult)
+		if !ok {
+			t.Fatalf("got %T: %v", raw, raw)
+		}
+		if !got.Decision.Allowed {
+			t.Fatalf("a previously-forbidden mutating command must be allowed in denylist mode: %+v", got.Decision)
+		}
+		if got.Result == nil || !bytes.Contains(got.Result.Output, []byte("remounted")) {
+			t.Fatalf("result = %+v", got.Result)
+		}
+		if bytes.Contains(got.Result.Output, []byte("old-output")) {
+			t.Fatal("result included pre-transaction output")
+		}
+		records, err := d.aw.ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var kinds []string
+		for _, rec := range records {
+			kinds = append(kinds, rec.Kind)
+		}
+		want := []string{"proposal", "unsafe-shell-approval", "transaction", "result"}
+		if fmt.Sprint(kinds) != fmt.Sprint(want) {
+			t.Fatalf("audit kinds = %v, want %v", kinds, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unsafe-shell execute did not finish")
+	}
+}
+
+func TestConcurrentUnsafeShellReturnsBusy(t *testing.T) {
+	d := newTestDispatcher(t)
+	d.unsafeShellPolicy = policy.Denylist(policy.DenylistRules{})
+	stream := newFakeCoordStream()
+	if err := d.coord.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	payload := mustJSON(t, unsafeShellExecutePayload{SessionID: d.coord.SessionID(), Text: "mount -o remount,rw /", Purpose: "need rw", TimeoutMS: 1000})
+	first := make(chan any, 1)
+	go func() {
+		r, e := d.Dispatch(ipc.RoleUnsafeShell, v1.Request{Operation: v1.OpUnsafeShellExecute, Payload: payload})
+		if e != nil {
+			first <- e
+		} else {
+			first <- r
+		}
+	}()
+	waitForCond(t, time.Second, func() bool { return bytes.Contains(stream.writtenSoFar(), []byte("GWMARK:")) })
+	_, busy := d.Dispatch(ipc.RoleUnsafeShell, v1.Request{Operation: v1.OpUnsafeShellExecute, Payload: payload})
+	if busy == nil || !strings.Contains(busy.Message, "busy") {
+		t.Fatalf("second error = %v", busy)
+	}
+	written := string(stream.writtenSoFar())
+	parts := strings.Split(written, "GWMARK:")
+	marker := strings.Split(parts[1], ":")
+	stream.feedData([]byte("GWMARK:" + marker[0] + ":" + marker[1] + ":0\n"))
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("first unsafe-shell execute did not finish")
+	}
+	if bytes.Count(stream.writtenSoFar(), []byte("remount")) != 1 {
+		t.Fatal("more than one command was written")
+	}
+}
+
+func TestDiagnoseAndUnsafeShellDoNotSerializeAgainstEachOther(t *testing.T) {
+	d := newTestDispatcher(t)
+	d.policy = policy.Common()
+	d.unsafeShellPolicy = policy.Denylist(policy.DenylistRules{})
+	stream := newFakeCoordStream()
+	if err := d.coord.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The coordinator's single-active-transaction invariant, not either
+	// dispatcher mutex, is what must serialize these two automatic paths
+	// against each other; confirm it does so without a deadlock.
+	first := make(chan any, 1)
+	go func() {
+		r, e := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute,
+			Payload: mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", Purpose: "p", TimeoutMS: 1000})})
+		if e != nil {
+			first <- e
+		} else {
+			first <- r
+		}
+	}()
+	waitForCond(t, time.Second, func() bool { return bytes.Contains(stream.writtenSoFar(), []byte("GWMARK:")) })
+	_, protoErr := d.Dispatch(ipc.RoleUnsafeShell, v1.Request{Operation: v1.OpUnsafeShellExecute,
+		Payload: mustJSON(t, unsafeShellExecutePayload{SessionID: d.coord.SessionID(), Text: "mount -o remount,rw /", Purpose: "p", TimeoutMS: 1000})})
+	if protoErr == nil {
+		t.Fatal("expected the coordinator to reject a second concurrent transaction")
+	}
+	written := string(stream.writtenSoFar())
+	parts := strings.Split(written, "GWMARK:")
+	marker := strings.Split(parts[1], ":")
+	stream.feedData([]byte("Linux board\nGWMARK:" + marker[0] + ":" + marker[1] + ":0\n"))
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("diagnose did not finish")
+	}
+}
+
 func newFakeCoordStream() *fakeCoordStream {
 	return &fakeCoordStream{
 		identity: transport.Identity{Kind: "usb-serial-by-id", Key: "/dev/serial/by-id/usb-x"},

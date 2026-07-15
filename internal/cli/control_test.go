@@ -64,6 +64,50 @@ func TestDiagnoseExecuteUsesTypedRequestAndResult(t *testing.T) {
 	}
 }
 
+type unsafeShellDispatcher struct {
+	request UnsafeShellRequest
+}
+
+func (d *unsafeShellDispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolError) {
+	if err := json.Unmarshal(req.Payload, &d.request); err != nil {
+		return nil, &v1.ProtocolError{Code: v1.ErrCodeInvalidPayload, Message: err.Error()}
+	}
+	exitCode := 0
+	return UnsafeShellResult{
+		Decision:    policy.Decision{Allowed: true, Rule: "denylist.allow", Reason: "not denied"},
+		Transaction: &command.Transaction{ID: "txn-2", SessionID: d.request.SessionID, Text: d.request.Text},
+		Result:      &command.Result{TransactionID: "txn-2", Status: command.StatusCompleted, ExitCode: &exitCode},
+	}, nil
+}
+
+func TestUnsafeShellExecuteUsesTypedRequestAndResult(t *testing.T) {
+	d := &unsafeShellDispatcher{}
+	path := filepath.Join(t.TempDir(), "gatewayd.sock")
+	s, err := ipc.Listen(path, ipc.RoleUnsafeShell, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Serve()
+	t.Cleanup(func() { s.Close() })
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	want := UnsafeShellRequest{SessionID: "session-1", Text: "mount -o remount,rw /", Purpose: "need rw", TimeoutMS: 5000}
+	got, err := c.UnsafeShellExecute(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(d.request, want) {
+		t.Fatalf("request got %+v, want %+v", d.request, want)
+	}
+	if !got.Decision.Allowed || got.Transaction == nil || got.Transaction.ID != "txn-2" || got.Result == nil || got.Result.Status != command.StatusCompleted {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+}
+
 func newTestServer(t *testing.T, role ipc.Role) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gatewayd.sock")

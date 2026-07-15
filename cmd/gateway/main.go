@@ -38,12 +38,13 @@ func main() {
 	controlSock := filepath.Join(dirs.Data, "gatewayd.control.sock")
 	attachSock := filepath.Join(dirs.Data, "gatewayd.attach.sock")
 	diagnoseSock := filepath.Join(dirs.Data, "gatewayd.diagnose.sock")
-	if err := runCLI(os.Args[1:], socketPaths{Control: controlSock, Attach: attachSock, Diagnose: diagnoseSock, ProfileDir: filepath.Join(dirs.Config, "profiles")}, cli.Dial, os.Stdout, os.Stderr); err != nil {
+	unsafeShellSock := filepath.Join(dirs.Data, "gatewayd.unsafeshell.sock")
+	if err := runCLI(os.Args[1:], socketPaths{Control: controlSock, Attach: attachSock, Diagnose: diagnoseSock, UnsafeShell: unsafeShellSock, ProfileDir: filepath.Join(dirs.Config, "profiles")}, cli.Dial, os.Stdout, os.Stderr); err != nil {
 		fatal(err)
 	}
 }
 
-type socketPaths struct{ Control, Attach, Diagnose, ProfileDir string }
+type socketPaths struct{ Control, Attach, Diagnose, UnsafeShell, ProfileDir string }
 type clientDialer func(string) (*cli.Client, error)
 
 const maxConfirmationBytes = 4 * 1024
@@ -121,6 +122,29 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 			_, err = fmt.Fprintln(stdout, string(data))
 			return err
 		})
+	case "unsafe-shell":
+		req := cli.UnsafeShellRequest{SessionID: flagValue(args, "--session"), Text: flagValue(args, "--text"), Purpose: flagValue(args, "--purpose"), TimeoutMS: parseInt(flagValue(args, "--timeout-ms"))}
+		if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.Text) == "" || strings.TrimSpace(req.Purpose) == "" || req.TimeoutMS <= 0 {
+			return fmt.Errorf("unsafe-shell requires nonempty --session, --text, --purpose, and positive --timeout-ms")
+		}
+		if req.TimeoutMS > command.MaxDiagnosticTimeoutMS {
+			return fmt.Errorf("unsafe-shell --timeout-ms must not exceed %d", command.MaxDiagnosticTimeoutMS)
+		}
+		if _, err := fmt.Fprintln(stderr, req.Text); err != nil {
+			return fmt.Errorf("display unsafe-shell command: %w", err)
+		}
+		return runClient(sockets.UnsafeShell, dial, func(c *cli.Client) error {
+			result, err := c.UnsafeShellExecute(req)
+			if err != nil {
+				return err
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(stdout, string(data))
+			return err
+		})
 	case "approve":
 		proposal, confirmation := flagValue(args, "--proposal"), flagValue(args, "--confirmation")
 		if strings.TrimSpace(proposal) == "" || strings.TrimSpace(confirmation) == "" {
@@ -155,6 +179,7 @@ commands:
   output --after N                         read console output after sequence N
   propose --session ID --text TEXT --purpose P --timeout-ms MS
   diagnose --session ID --text TEXT --purpose P --timeout-ms MS
+  unsafe-shell --session ID --text TEXT --purpose P --timeout-ms MS
   approve --proposal ID --confirmation NOTE
   export                                   export transcript/audit records
   attach                                   attach the interactive terminal`)

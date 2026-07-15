@@ -42,6 +42,13 @@ type dispatcher struct {
 	diagnosticCtx    context.Context
 	diagnosticCancel context.CancelFunc
 
+	// unsafeShellPolicy and unsafeShellMu are entirely separate from
+	// policy/diagnosticMu above: RoleUnsafeShell and RoleDiagnose must
+	// stay isolated so a bug or misconfiguration in one automatic
+	// execution path can never affect the other.
+	unsafeShellPolicy *policy.DenylistPolicy
+	unsafeShellMu     sync.Mutex
+
 	retentionLimit int
 
 	// listPorts/openPort are overridden in tests to avoid touching real
@@ -124,6 +131,8 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 		return d.outputRead(req.Payload)
 	case v1.OpDiagnoseExecute:
 		return d.diagnoseExecute(req.Payload)
+	case v1.OpUnsafeShellExecute:
+		return d.unsafeShellExecute(req.Payload)
 	case v1.OpCommandPropose:
 		return d.commandPropose(req.Payload)
 	case v1.OpCommandList:
@@ -373,6 +382,87 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	}
 	d.audit("proposal", tx.SourceProposalID)
 	d.audit("auto-readonly-approval", tx.SourceProposalID)
+	out.Transaction = tx
+	d.audit("transaction", tx.ID)
+	if d.open != nil {
+		_ = d.open.add(tx.ID)
+	}
+	res, waitErr := d.coord.WaitResult(d.diagnosticCtx, tx.ID)
+	if waitErr != nil {
+		return nil, internalErr(waitErr)
+	}
+	if err != nil && res == nil {
+		return nil, badPayload(err)
+	}
+	if d.open != nil {
+		_ = d.open.remove(tx.ID)
+	}
+	d.audit("result", fmt.Sprintf("transaction=%s status=%s", tx.ID, res.Status))
+	copyResult := *res
+	copyResult.Output = append([]byte(nil), res.Output...)
+	out.TruncatedStart = copyResult.OutputTruncatedStart
+	if len(copyResult.Output) > diagnosticOutputLimit {
+		copyResult.Output = copyResult.Output[:diagnosticOutputLimit]
+		out.TruncatedEnd = true
+	}
+	out.Result = &copyResult
+	return out, nil
+}
+
+type unsafeShellExecutePayload struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text"`
+	Purpose   string `json:"purpose"`
+	TimeoutMS int64  `json:"timeout_ms"`
+}
+
+type unsafeShellExecuteResult struct {
+	Decision       policy.Decision      `json:"decision"`
+	Transaction    *command.Transaction `json:"transaction,omitempty"`
+	Result         *command.Result      `json:"result,omitempty"`
+	TruncatedStart bool                 `json:"truncated_start"`
+	TruncatedEnd   bool                 `json:"truncated_end"`
+}
+
+// unsafeShellExecute mirrors diagnoseExecute's atomic classify/propose/
+// approve/execute/wait sequence exactly; only the policy, the mutex, and
+// the audit label differ. Keeping the shape identical is deliberate: the
+// two automatic paths share the coordinator's safety-relevant lifecycle
+// and differ only in which policy decided the command was permitted.
+func (d *dispatcher) unsafeShellExecute(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p unsafeShellExecutePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	if d.unsafeShellPolicy == nil {
+		return nil, internalErr(fmt.Errorf("unsafe-shell mode is disabled"))
+	}
+	if p.SessionID == "" || p.Text == "" || p.Purpose == "" {
+		return nil, badPayload(fmt.Errorf("session_id, text, and purpose must be nonempty"))
+	}
+	if p.TimeoutMS <= 0 || p.TimeoutMS > command.MaxDiagnosticTimeoutMS {
+		return nil, badPayload(fmt.Errorf("timeout_ms must be between 1 and %d", command.MaxDiagnosticTimeoutMS))
+	}
+	if !d.unsafeShellMu.TryLock() {
+		return nil, badPayload(fmt.Errorf("unsafe-shell execution is busy"))
+	}
+	defer d.unsafeShellMu.Unlock()
+	decision := d.unsafeShellPolicy.Evaluate(p.Text)
+	out := unsafeShellExecuteResult{Decision: decision}
+	if !decision.Allowed {
+		return out, nil
+	}
+	if p.SessionID != d.coord.SessionID() {
+		return nil, badPayload(fmt.Errorf("session is not current"))
+	}
+	tx, err := d.coord.DiagnoseStart(p.SessionID, p.Text, p.Purpose, time.Duration(p.TimeoutMS)*time.Millisecond)
+	if err != nil {
+		if tx == nil {
+			return nil, badPayload(err)
+		}
+	}
+	d.audit("proposal", tx.SourceProposalID)
+	d.audit("unsafe-shell-approval", tx.SourceProposalID)
 	out.Transaction = tx
 	d.audit("transaction", tx.ID)
 	if d.open != nil {

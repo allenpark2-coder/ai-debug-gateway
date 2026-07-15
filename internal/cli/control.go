@@ -35,6 +35,25 @@ type DiagnoseResult struct {
 	TruncatedEnd   bool                 `json:"truncated_end"`
 }
 
+// UnsafeShellRequest carries one denylist-gated shell command. It is a
+// separate type from DiagnoseRequest, deliberately identical in shape: the
+// two modes differ in policy and IPC role, not in request/response shape.
+type UnsafeShellRequest struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text"`
+	Purpose   string `json:"purpose"`
+	TimeoutMS int64  `json:"timeout_ms"`
+}
+
+// UnsafeShellResult reports the policy decision and, when allowed, execution data.
+type UnsafeShellResult struct {
+	Decision       policy.Decision      `json:"decision"`
+	Transaction    *command.Transaction `json:"transaction,omitempty"`
+	Result         *command.Result      `json:"result,omitempty"`
+	TruncatedStart bool                 `json:"truncated_start"`
+	TruncatedEnd   bool                 `json:"truncated_end"`
+}
+
 // Dial connects to the daemon socket at path.
 func Dial(path string) (*Client, error) {
 	conn, err := ipc.Dial(path)
@@ -142,6 +161,13 @@ func (c *Client) OutputRead(after uint64, max int) (json.RawMessage, error) {
 func (c *Client) DiagnoseExecute(req DiagnoseRequest) (DiagnoseResult, error) {
 	var out DiagnoseResult
 	err := c.Call(v1.OpDiagnoseExecute, req, &out)
+	return out, err
+}
+
+// UnsafeShellExecute evaluates and executes a denylist-gated shell command.
+func (c *Client) UnsafeShellExecute(req UnsafeShellRequest) (UnsafeShellResult, error) {
+	var out UnsafeShellResult
+	err := c.Call(v1.OpUnsafeShellExecute, req, &out)
 	return out, err
 }
 

@@ -22,7 +22,7 @@ type cliCaptureDispatcher struct{ requests []v1.Request }
 
 func (d *cliCaptureDispatcher) Dispatch(_ ipc.Role, req v1.Request) (any, *v1.ProtocolError) {
 	d.requests = append(d.requests, req)
-	if req.Operation == v1.OpDiagnoseExecute {
+	if req.Operation == v1.OpDiagnoseExecute || req.Operation == v1.OpUnsafeShellExecute {
 		return map[string]any{"decision": map[string]any{"allowed": true}}, nil
 	}
 	return map[string]string{"state": "approved"}, nil
@@ -94,6 +94,49 @@ func TestDiagnoseRejectsOversizedConfirmationAndDisplayErrorsBeforeDial(t *testi
 				stderr = failingWriter{}
 			}
 			err := runCLI(args, socketPaths{}, func(string) (*cli.Client, error) { dials++; return nil, nil }, &bytes.Buffer{}, stderr)
+			if err == nil || dials != 0 {
+				t.Fatalf("err=%v dials=%d", err, dials)
+			}
+		})
+	}
+}
+
+func TestUnsafeShellRoutesValidRequestAndPrintsCommandFirst(t *testing.T) {
+	d := &cliCaptureDispatcher{}
+	path := testCLIServer(t, ipc.RoleUnsafeShell, d)
+	var dialed []string
+	dial := func(got string) (*cli.Client, error) { dialed = append(dialed, got); return cli.Dial(path) }
+	var stdout, stderr bytes.Buffer
+	err := runCLI([]string{"unsafe-shell", "--session", "s1", "--text", "mount -o remount,rw /", "--purpose", "need rw", "--timeout-ms", "15"},
+		socketPaths{UnsafeShell: "gatewayd.unsafeshell.sock", Control: "control", Attach: "attach", Diagnose: "diagnose"}, dial, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dialed) != 1 || dialed[0] != "gatewayd.unsafeshell.sock" {
+		t.Fatalf("dialed %v", dialed)
+	}
+	if !strings.HasPrefix(stderr.String(), "mount -o remount,rw /\n") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if !json.Valid(bytes.TrimSpace(stdout.Bytes())) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if len(d.requests) != 1 || d.requests[0].Operation != v1.OpUnsafeShellExecute {
+		t.Fatalf("requests = %+v", d.requests)
+	}
+}
+
+func TestUnsafeShellValidatesRequiredFlagsBeforeDial(t *testing.T) {
+	cases := [][]string{
+		{"unsafe-shell", "--text", "mount", "--purpose", "list", "--timeout-ms", "1"},
+		{"unsafe-shell", "--session", "s", "--purpose", "list", "--timeout-ms", "1"},
+		{"unsafe-shell", "--session", "s", "--text", "mount", "--timeout-ms", "1"},
+		{"unsafe-shell", "--session", "s", "--text", "mount", "--purpose", "list", "--timeout-ms", "0"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			dials := 0
+			err := runCLI(args, socketPaths{}, func(string) (*cli.Client, error) { dials++; return nil, nil }, &bytes.Buffer{}, &bytes.Buffer{})
 			if err == nil || dials != 0 {
 				t.Fatalf("err=%v dials=%d", err, dials)
 			}

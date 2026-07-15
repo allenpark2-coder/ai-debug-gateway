@@ -5,8 +5,10 @@ persistent ARM target console over UART or SSH. `gatewayd` is the only
 process allowed to own the serial device or SSH connection; every
 State-changing AI-proposed commands must be explicitly approved by a human
 before they reach the target. An optional, policy-gated diagnostic mode can
-execute a small built-in set of read-only commands automatically. A board session uses exactly one active
-transport at a time.
+execute a small built-in set of read-only commands automatically, and a
+separate, independently opt-in denylist mode can execute unattended
+state-changing commands on a board whose operator has explicitly accepted
+that risk. A board session uses exactly one active transport at a time.
 
 Linux only. Automatic U-Boot interruption, file transfer/forwarding,
 and Windows support are not implemented yet (see
@@ -56,6 +58,33 @@ it contains only `{"allow":[],"deny":[]}`. The file must be mode `0600`;
 keeping its directory owner-only is also recommended. Invalid file permissions
 or content prevent auto-readonly startup.
 
+A second, independently opt-in mode allows unattended state-changing
+commands, subject only to a small non-configurable set of structural
+denials and a board-scoped denylist:
+
+```sh
+gatewayd --unsafe-auto-shell=myboard
+gateway unsafe-shell --session SESSION_ID --text 'mount -o remount,rw /' \
+  --purpose 'need rw to patch config' --timeout-ms 15000
+```
+
+This mode is a deliberate transfer of risk to the operator, not a hardened
+default: it never asks a human before running a command, and it is meant
+for boards that are recoverable by reflashing firmware and carry no
+OTP/eFuse or other operation a reflash cannot undo. It requires its own file
+at `$XDG_CONFIG_HOME/ai-debug-gateway/unsafe-shell/<board>.json`, deliberately
+separate from the diagnostic policy directory above, containing at least
+`{"risk_accepted": true}` -- the operator's explicit, per-board attestation
+that they accept this risk. The file must be mode `0600`; a missing or
+invalid file disables only this socket, never manual mode or
+`--auto-readonly`. Interpreters (`sh`, `python`, ...), `eval`, command/process
+substitution, indirect execution (`exec`, `env`, `xargs`, `find -exec`), and
+sensitive-path reads remain denied unconditionally and cannot be overridden
+by the board file; the file can only add further denials (`deny_executables`,
+`deny_exact`) on top of that, never grant an exception to them. See
+`docs/superpowers/specs/2026-07-15-auto-shell-denylist-design.md` for the
+full design.
+
 After explicit confirmation in chat, a local agent can approve one mutation:
 
 ```sh
@@ -64,8 +93,9 @@ gateway approve --proposal PROPOSAL_ID \
 ```
 
 This delegates attach capability to that local process for the proposal. The
-confirmation is recorded as redacted audit metadata; control and diagnose
-sockets still cannot approve. Use `gateway attach` for manual fallback.
+confirmation is recorded as redacted audit metadata; control, diagnose, and
+unsafe-shell sockets still cannot approve. Use `gateway attach` for manual
+fallback.
 
 Inside `attach`, ordinary keystrokes go straight to the target. Press
 `Ctrl-]` to enter local command mode:
@@ -119,7 +149,8 @@ locations, and each transport's authentication and reconnect model.
 ## Status
 
 UART (Phase 1) and SSH (Phase 2) are both complete, tested vertical
-slices, including opt-in read-only diagnosis. Known follow-ups before hardware acceptance:
+slices, including opt-in read-only diagnosis and opt-in denylist-mode
+unattended shell execution. Known follow-ups before hardware acceptance:
 
 - The pinned `go.bug.st/serial` backend has no public way to enable
   hardware or software flow control on Linux; `Open` rejects a

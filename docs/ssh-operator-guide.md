@@ -92,8 +92,35 @@ override common denials.
 Denied work stays in the manual proposal flow. Review it in `gateway attach`,
 or—only after explicit operator confirmation in chat—use `gateway approve
 --proposal ID --confirmation 'operator confirmed in chat'`. This delegates
-attach capability to the local agent for that mutation; control and diagnose
-sockets remain unable to approve. Confirmation is redacted in the audit log.
+attach capability to the local agent for that mutation; control, diagnose,
+and unsafe-shell sockets remain unable to approve. Confirmation is redacted
+in the audit log.
+
+## Automatic denylist-mode shell execution
+
+A second, independently opt-in mode allows unattended state-changing
+commands. Start `gatewayd --unsafe-auto-shell=myboard`, then run:
+
+```sh
+gateway unsafe-shell --session SESSION_ID --text 'mount -o remount,rw /' \
+  --purpose 'need rw to patch config' --timeout-ms 15000
+```
+
+This is a deliberate transfer of risk to the operator, not a hardened
+default: it never asks a human before running a command, so use it only on
+a board recoverable by reflashing firmware, with no OTP/eFuse or other
+operation a reflash cannot undo. The unsafe-shell socket is absent by
+default. Enabling it requires
+`$XDG_CONFIG_HOME/ai-debug-gateway/unsafe-shell/<board>.json`, mode `0600`,
+containing at least `{"risk_accepted": true}` -- the operator's explicit
+per-board attestation. A missing or invalid file disables only this socket;
+manual mode and `--auto-readonly` are unaffected, and the two automatic
+modes can run on the same daemon without either weakening the other's
+policy. Interpreters, `eval`, command/process substitution, indirect
+execution (`exec`, `env`, `xargs`, `find -exec`), and sensitive-path reads
+remain denied unconditionally regardless of board configuration; the file
+can only add further denials (`deny_executables`, `deny_exact`), never grant
+an exception to them.
 
 ## Disconnect and reconnect
 

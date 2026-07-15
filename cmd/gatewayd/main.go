@@ -26,7 +26,8 @@ import (
 )
 
 type daemonOptions struct {
-	AutoReadonly bool
+	AutoReadonly    bool
+	UnsafeAutoShell string
 }
 
 type daemonServer interface {
@@ -57,6 +58,7 @@ func parseDaemonOptions(args []string) (daemonOptions, error) {
 	flags := flag.NewFlagSet("gatewayd", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.BoolVar(&options.AutoReadonly, "auto-readonly", false, "enable board diagnostic policy")
+	flags.StringVar(&options.UnsafeAutoShell, "unsafe-auto-shell", "", "enable unattended denylist-mode shell execution for the named board; the board's risk_accepted unsafe-shell file is required")
 	if err := flags.Parse(args); err != nil {
 		return daemonOptions{}, err
 	}
@@ -74,6 +76,22 @@ func loadDaemonPolicy(options daemonOptions, configDir, board string) (*policy.P
 	loaded, err := policy.LoadFile(filepath.Join(configDir, "policies", board+".json"), base)
 	if err != nil {
 		return nil, fmt.Errorf("board policy for %q: %w", board, err)
+	}
+	return loaded, nil
+}
+
+// loadUnsafeShellDaemonPolicy loads the denylist-mode policy only when
+// options.UnsafeAutoShell names a board; otherwise it returns nil,nil so
+// the unsafe-shell socket is never created. Deliberately a different
+// directory from loadDaemonPolicy's policies/<board>.json, so this mode
+// cannot be enabled by editing the file --auto-readonly already uses.
+func loadUnsafeShellDaemonPolicy(options daemonOptions, configDir string) (*policy.DenylistPolicy, error) {
+	if options.UnsafeAutoShell == "" {
+		return nil, nil
+	}
+	loaded, err := policy.LoadUnsafeShellFile(filepath.Join(configDir, "unsafe-shell", options.UnsafeAutoShell+".json"))
+	if err != nil {
+		return nil, fmt.Errorf("unsafe-shell policy for %q: %w", options.UnsafeAutoShell, err)
 	}
 	return loaded, nil
 }
@@ -157,7 +175,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	_ = diagnosticPolicy
+	// Unlike diagnosticPolicy above, a load failure here does not abort
+	// startup: per the design (docs/superpowers/specs/2026-07-15-auto-
+	// shell-denylist-design.md), an invalid or risk-not-accepted board
+	// file disables only the unsafe-shell socket, never manual mode or
+	// --auto-readonly.
+	unsafeShellPolicy, unsafeShellErr := loadUnsafeShellDaemonPolicy(options, d.Config)
+	unsafeShellEnabled := options.UnsafeAutoShell != ""
+	if unsafeShellErr != nil {
+		log.Printf("gatewayd: unsafe-shell mode disabled: %v", unsafeShellErr)
+		unsafeShellPolicy = nil
+		unsafeShellEnabled = false
+	}
 
 	lock, err := acquireLock(filepath.Join(d.Data, "gatewayd.lock"))
 	if err != nil {
@@ -186,6 +215,7 @@ func run() error {
 
 	disp := newDispatcher(board, profileDir, coord, open, aw, tw, defaultLoginConfig(username))
 	disp.policy = diagnosticPolicy
+	disp.unsafeShellPolicy = unsafeShellPolicy
 
 	drainStop := make(chan struct{})
 	go runTranscriptDrain(coord, tw, board, drainStop)
@@ -198,17 +228,23 @@ func run() error {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
-	return serveDaemonSockets(d.Data, board, options.AutoReadonly, disp, sig,
+	return serveDaemonSockets(d.Data, board, options.AutoReadonly, unsafeShellEnabled, disp, sig,
 		func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 			return ipc.Listen(path, role, dispatch)
 		}, log.Default())
 }
 
-func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) (retErr error) {
+func serveDaemonSockets(dataDir, board string, autoReadonly, unsafeAutoShell bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) (retErr error) {
 	diagnosePath := filepath.Join(dataDir, "gatewayd.diagnose.sock")
 	if !autoReadonly {
 		if err := os.Remove(diagnosePath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove disabled diagnose socket: %w", err)
+		}
+	}
+	unsafeShellPath := filepath.Join(dataDir, "gatewayd.unsafeshell.sock")
+	if !unsafeAutoShell {
+		if err := os.Remove(unsafeShellPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove disabled unsafe-shell socket: %w", err)
 		}
 	}
 	type listenerSpec struct {
@@ -218,6 +254,9 @@ func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispa
 	specs := []listenerSpec{{"control", filepath.Join(dataDir, "gatewayd.control.sock"), ipc.RoleControl}, {"attach", filepath.Join(dataDir, "gatewayd.attach.sock"), ipc.RoleAttach}}
 	if autoReadonly {
 		specs = append(specs, listenerSpec{"diagnose", diagnosePath, ipc.RoleDiagnose})
+	}
+	if unsafeAutoShell {
+		specs = append(specs, listenerSpec{"unsafeshell", unsafeShellPath, ipc.RoleUnsafeShell})
 	}
 	servers := make(listenerGroup, 0, len(specs))
 	defer func() { retErr = errors.Join(retErr, servers.Close()) }()
@@ -235,11 +274,11 @@ func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispa
 		}
 		servers = append(servers, srv)
 	}
-	if autoReadonly {
-		logger.Printf("gatewayd: board=%s control=%s attach=%s diagnose=%s", board, specs[0].path, specs[1].path, specs[2].path)
-	} else {
-		logger.Printf("gatewayd: board=%s control=%s attach=%s", board, specs[0].path, specs[1].path)
+	logLine := fmt.Sprintf("gatewayd: board=%s control=%s attach=%s", board, specs[0].path, specs[1].path)
+	for _, spec := range specs[2:] {
+		logLine += fmt.Sprintf(" %s=%s", spec.name, spec.path)
 	}
+	logger.Print(logLine)
 	errs := make(chan error, len(servers))
 	for i, srv := range servers {
 		name := specs[i].name

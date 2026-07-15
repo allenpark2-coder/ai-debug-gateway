@@ -28,72 +28,10 @@ func allow(rule string) Decision {
 }
 
 func (p *Policy) Evaluate(text string) Decision {
-	file, err := syntax.NewParser().Parse(strings.NewReader(text), "diagnostic")
-	if err != nil {
-		return deny("syntax.parse", err.Error())
-	}
-	if len(file.Stmts) == 0 {
-		return deny("syntax.empty", "empty shell input is not allowed")
-	}
-
-	decision := allow("common")
-	callCount := 0
-	fileRuleUsed := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if node == nil || !decision.Allowed {
-			return false
-		}
-		switch n := node.(type) {
-		case *syntax.File, *syntax.Comment, *syntax.Word, *syntax.Lit, *syntax.SglQuoted:
-			return true
-		case *syntax.Stmt:
-			if n.Negated || n.Background || n.Coprocess || n.Disown || len(n.Redirs) != 0 {
-				decision = deny("syntax.statement", "redirection, background, negation, and coprocess syntax are not allowed")
-				return false
-			}
-			return true
-		case *syntax.BinaryCmd:
-			if n.Op != syntax.AndStmt && n.Op != syntax.OrStmt && n.Op != syntax.Pipe {
-				decision = deny("syntax.operator", "only ;, &&, ||, and pipelines are allowed")
-				return false
-			}
-			return true
-		case *syntax.DblQuoted:
-			for _, part := range n.Parts {
-				if _, ok := part.(*syntax.Lit); !ok {
-					decision = deny("syntax.expansion", "shell expansions are not allowed")
-					return false
-				}
-			}
-			return true
-		case *syntax.CallExpr:
-			callCount++
-			if len(n.Assigns) != 0 {
-				decision = deny("syntax.assignment", "shell assignments are not allowed")
-				return false
-			}
-			argv, ok := literalArgv(n.Args)
-			if !ok {
-				decision = deny("syntax.expansion", "command arguments must be literal")
-				return false
-			}
-			decision = p.evaluateArgv(argv)
-			if decision.Allowed && decision.Rule == "file.allow" {
-				fileRuleUsed = true
-			}
-			return decision.Allowed
-		default:
-			decision = deny("syntax.unsupported", fmt.Sprintf("unsupported shell syntax %T", node))
-			return false
-		}
+	return evaluateShellLine(text, walkOptions{
+		allowRedirection: false,
+		classify:         p.evaluateArgv,
 	})
-	if decision.Allowed && callCount == 0 {
-		return deny("syntax.no-command", "input contains no command")
-	}
-	if decision.Allowed && fileRuleUsed && callCount != 1 {
-		return deny("file.exact", "board policy rules must be used as a single exact command")
-	}
-	return decision
 }
 
 func literalArgv(words []*syntax.Word) ([]string, bool) {
