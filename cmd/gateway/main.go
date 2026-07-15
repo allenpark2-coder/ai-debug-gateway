@@ -137,7 +137,6 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 	default:
 		return fmt.Errorf("unknown command %q", argv[0])
 	}
-	return nil
 }
 
 func usage() {

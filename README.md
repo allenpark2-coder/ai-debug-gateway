@@ -3,8 +3,9 @@
 A host-side debug gateway that lets a human and an AI assistant share a
 persistent ARM target console over UART or SSH. `gatewayd` is the only
 process allowed to own the serial device or SSH connection; every
-AI-proposed command must be explicitly approved by a human before it
-ever reaches the target. A board session uses exactly one active
+State-changing AI-proposed commands must be explicitly approved by a human
+before they reach the target. An optional, policy-gated diagnostic mode can
+execute a small built-in set of read-only commands automatically. A board session uses exactly one active
 transport at a time.
 
 Linux only. Automatic U-Boot interruption, file transfer/forwarding,
@@ -37,6 +38,33 @@ gateway profile create
 gateway start --board myboard
 gateway attach
 ```
+
+Automatic read-only diagnosis is opt-in:
+
+```sh
+GATEWAYD_BOARD=myboard gatewayd --auto-readonly
+gateway diagnose --session SESSION_ID --text 'ps -ef' \
+  --purpose 'inspect process state' --timeout-ms 15000
+```
+
+Without `--auto-readonly`, the diagnose socket does not exist and manual
+approval remains the default. The common policy denies substitutions,
+redirections, sensitive paths, mutators, and unknown vendor commands before
+any bytes reach the target. Optional exact board-specific read-only forms live
+in `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`; keep its directory
+owner-only and the file mode `0600`. Invalid permissions or content prevent
+auto-readonly startup.
+
+After explicit confirmation in chat, a local agent can approve one mutation:
+
+```sh
+gateway approve --proposal PROPOSAL_ID \
+  --confirmation 'operator confirmed this mutation in chat'
+```
+
+This delegates attach capability to that local process for the proposal. The
+confirmation is recorded as redacted audit metadata; control and diagnose
+sockets still cannot approve. Use `gateway attach` for manual fallback.
 
 Inside `attach`, ordinary keystrokes go straight to the target. Press
 `Ctrl-]` to enter local command mode:
@@ -90,7 +118,7 @@ locations, and each transport's authentication and reconnect model.
 ## Status
 
 UART (Phase 1) and SSH (Phase 2) are both complete, tested vertical
-slices. Known follow-ups before hardware acceptance:
+slices, including opt-in read-only diagnosis. Known follow-ups before hardware acceptance:
 
 - The pinned `go.bug.st/serial` backend has no public way to enable
   hardware or software flow control on Linux; `Open` rejects a

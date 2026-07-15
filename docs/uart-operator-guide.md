@@ -1,7 +1,7 @@
 # UART operator guide
 
-This covers the first release: Linux, UART only. SSH, automatic U-Boot
-interruption, file transfer, and Windows are not implemented (see
+This covers the Linux UART transport. Automatic U-Boot interruption, file
+transfer, and Windows are not implemented (SSH is documented separately; see
 `docs/superpowers/specs/2026-07-15-ai-debug-gateway-design.md`).
 
 ## File locations
@@ -14,6 +14,8 @@ owner-only permissions if missing:
 | Board profiles | `$XDG_CONFIG_HOME/ai-debug-gateway/profiles/<name>.json` (default `~/.config/...`) |
 | Control socket (AI-capable) | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.control.sock` (default `~/.local/share/...`) |
 | Attach socket (human-only) | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.attach.sock` |
+| Diagnose socket (opt-in, policy-limited) | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.diagnose.sock` |
+| Board diagnostic policy | `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json` |
 | Single-instance lock | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.lock` |
 | Durable transcript | `$XDG_DATA_HOME/ai-debug-gateway/transcript.jsonl` |
 | Durable audit log | `$XDG_DATA_HOME/ai-debug-gateway/audit.jsonl` |
@@ -34,6 +36,27 @@ gatewayd
 `root`) are read from the environment. `gatewayd` logs the resolved
 socket paths on startup and runs until it receives `SIGINT` or
 `SIGTERM`.
+
+Automatic read-only diagnosis is explicit opt-in:
+
+```sh
+GATEWAYD_BOARD=myboard gatewayd --auto-readonly
+gateway diagnose --session SESSION_ID --text 'dmesg' \
+  --purpose 'inspect boot errors' --timeout-ms 15000
+```
+
+Ordinary startup omits the diagnose socket. The optional board policy is
+loaded once, from `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`;
+its directory must be owner-only and the file mode `0600`. It may add exact
+read-only vendor argv forms, but cannot override common denials. Unknown tools,
+substitutions, redirections, sensitive paths, and state changes are rejected
+before the UART is written.
+
+For denied commands, use `gateway propose` and review in `gateway attach`.
+Only after explicit chat confirmation may a local agent use `gateway approve
+--proposal ID --confirmation 'operator confirmed in chat'`. That delegates
+attach capability for the mutation; control and diagnose sockets remain unable
+to approve. Confirmation is stored only as redacted audit metadata.
 
 If `gatewayd` was killed or crashed while a transaction was approved or
 running, the next startup finalizes it as `daemon-restarted` in the

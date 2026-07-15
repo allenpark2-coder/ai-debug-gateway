@@ -63,7 +63,9 @@ func TestServeDaemonSocketsAreOptInAndCloseTogether(t *testing.T) {
 			stop := make(chan os.Signal, 1)
 			var logs syncBuffer
 			done := make(chan error, 1)
-			go func() { done <- serveDaemonSockets(t.TempDir(), auto, nil, stop, listen, log.New(&logs, "", 0)) }()
+			go func() {
+				done <- serveDaemonSockets(t.TempDir(), "board-1", auto, nil, stop, listen, log.New(&logs, "", 0))
+			}()
 			want := 2
 			if auto {
 				want = 3
@@ -99,6 +101,33 @@ func TestServeDaemonSocketsAreOptInAndCloseTogether(t *testing.T) {
 	}
 }
 
+func TestServeDaemonSocketsLogsBoardName(t *testing.T) {
+	created := make(chan struct{}, 2)
+	listen := func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error) {
+		s := newFakeDaemonServer()
+		created <- struct{}{}
+		return s, nil
+	}
+	stop := make(chan os.Signal, 1)
+	var logs syncBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(t.TempDir(), "camera-7", false, nil, stop, listen, log.New(&logs, "", 0))
+	}()
+	<-created
+	<-created
+	for deadline := time.Now().Add(time.Second); logs.String() == "" && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "board=camera-7") {
+		t.Fatalf("logs = %q, want board name", logs.String())
+	}
+	stop <- os.Interrupt
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServeDaemonSocketsClosesAllOnServerError(t *testing.T) {
 	var servers []*fakeDaemonServer
 	created := make(chan struct{}, 3)
@@ -110,7 +139,7 @@ func TestServeDaemonSocketsClosesAllOnServerError(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(t.TempDir(), true, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+		done <- serveDaemonSockets(t.TempDir(), "board-1", true, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
 	}()
 	for i := 0; i < 3; i++ {
 		<-created
@@ -139,7 +168,7 @@ func TestServeDaemonSocketsTreatsNilServeReturnAsFailure(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(t.TempDir(), false, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+		done <- serveDaemonSockets(t.TempDir(), "board-1", false, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
 	}()
 	for i := 0; i < 2; i++ {
 		<-created
@@ -160,7 +189,7 @@ func TestShutdownClosesEveryListenerBeforeWaitingForHeldClient(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(dir, true, nil, stop,
+		done <- serveDaemonSockets(dir, "board-1", true, nil, stop,
 			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 				return ipc.Listen(path, role, dispatch)
 			},
@@ -229,7 +258,7 @@ func TestDiagnoseSocketHasOwnerOnlyMode(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(dir, true, nil, stop,
+		done <- serveDaemonSockets(dir, "board-1", true, nil, stop,
 			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 				return ipc.Listen(path, role, dispatch)
 			},
@@ -267,7 +296,9 @@ func TestOrdinaryStartupRemovesStaleDiagnoseSocket(t *testing.T) {
 	}
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
-	go func() { done <- serveDaemonSockets(dir, false, nil, stop, listen, log.New(io.Discard, "", 0)) }()
+	go func() {
+		done <- serveDaemonSockets(dir, "board-1", false, nil, stop, listen, log.New(io.Discard, "", 0))
+	}()
 	for i := 0; i < 2; i++ {
 		<-created
 	}
