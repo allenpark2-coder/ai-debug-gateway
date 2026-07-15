@@ -72,6 +72,28 @@ session: `cd`, `export`, and shell functions all survive across
 approved commands on the same connection, exactly like UART. Terminal
 resize propagates to the remote PTY.
 
+## Automatic read-only diagnosis
+
+Start `GATEWAYD_BOARD=myboard gatewayd --auto-readonly`, then run:
+
+```sh
+gateway diagnose --session SESSION_ID --text 'ps -ef' \
+  --purpose 'inspect process state' --timeout-ms 15000
+```
+
+The diagnose socket is absent by default. Common rules default-deny unknown
+vendor tools, substitutions/redirections, sensitive reads, and mutations
+before they reach the SSH PTY. Exact board additions live in
+`$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`; keep the directory
+owner-only and file mode `0600`, or startup fails. Extensions cannot override
+common denials.
+
+Denied work stays in the manual proposal flow. Review it in `gateway attach`,
+or—only after explicit operator confirmation in chat—use `gateway approve
+--proposal ID --confirmation 'operator confirmed in chat'`. This delegates
+attach capability to the local agent for that mutation; control and diagnose
+sockets remain unable to approve. Confirmation is redacted in the audit log.
+
 ## Disconnect and reconnect
 
 Network loss or the remote end closing the connection terminates the

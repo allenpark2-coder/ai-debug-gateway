@@ -197,13 +197,13 @@ func run() error {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
-	return serveDaemonSockets(d.Data, options.AutoReadonly, disp, sig,
+	return serveDaemonSockets(d.Data, board, options.AutoReadonly, disp, sig,
 		func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 			return ipc.Listen(path, role, dispatch)
 		}, log.Default())
 }
 
-func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) (retErr error) {
+func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) (retErr error) {
 	diagnosePath := filepath.Join(dataDir, "gatewayd.diagnose.sock")
 	if !autoReadonly {
 		if err := os.Remove(diagnosePath); err != nil && !os.IsNotExist(err) {
@@ -228,9 +228,9 @@ func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, 
 		servers = append(servers, srv)
 	}
 	if autoReadonly {
-		logger.Printf("gatewayd: control=%s attach=%s diagnose=%s", specs[0].path, specs[1].path, specs[2].path)
+		logger.Printf("gatewayd: board=%s control=%s attach=%s diagnose=%s", board, specs[0].path, specs[1].path, specs[2].path)
 	} else {
-		logger.Printf("gatewayd: control=%s attach=%s", specs[0].path, specs[1].path)
+		logger.Printf("gatewayd: board=%s control=%s attach=%s", board, specs[0].path, specs[1].path)
 	}
 	errs := make(chan error, len(servers))
 	for i, srv := range servers {

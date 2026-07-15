@@ -30,6 +30,13 @@ type sshTestServer struct {
 	commands       []string
 	conns          []net.Conn
 	listener       net.Listener
+	managedDelay   time.Duration
+}
+
+func (s *sshTestServer) SetManagedDelay(delay time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.managedDelay = delay
 }
 
 func newSSHTestServer(t *testing.T) *sshTestServer {
@@ -210,6 +217,12 @@ func (s *sshTestServer) runShell(ch ssh.Channel, cwd *string) {
 }
 
 func (s *sshTestServer) respondToManagedCommand(ch ssh.Channel, cwd *string, cmdText, txn, nonce string) {
+	s.mu.Lock()
+	delay := s.managedDelay
+	s.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	switch {
 	case cmdText == "pwd":
 		fmt.Fprintf(ch, "%s\r\nGWMARK:%s:%s:0\r\n", *cwd, txn, nonce)
