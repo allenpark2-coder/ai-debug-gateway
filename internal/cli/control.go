@@ -11,7 +11,7 @@ import (
 )
 
 // Client is a thin, synchronous wrapper over one IPC connection. Which
-// socket path it dials (control vs. attach) is the caller's choice;
+// role-specific socket path it dials is the caller's choice;
 // the daemon enforces the resulting capability boundary, not this
 // type.
 type Client struct {
@@ -173,8 +173,14 @@ func (c *Client) RecordsExport(afterTranscript, afterAudit uint64) (json.RawMess
 
 // CommandApprove approves a pending proposal (attach connections only).
 func (c *Client) CommandApprove(proposalID string) (json.RawMessage, error) {
+	return c.CommandApproveWithConfirmation(proposalID, "")
+}
+
+// CommandApproveWithConfirmation approves a pending proposal and carries an
+// optional human-confirmation note for the audit trail.
+func (c *Client) CommandApproveWithConfirmation(proposalID, confirmation string) (json.RawMessage, error) {
 	var out json.RawMessage
-	err := c.Call(v1.OpCommandApprove, map[string]string{"proposal_id": proposalID}, &out)
+	err := c.Call(v1.OpCommandApprove, map[string]string{"proposal_id": proposalID, "confirmation": confirmation}, &out)
 	return out, err
 }
 

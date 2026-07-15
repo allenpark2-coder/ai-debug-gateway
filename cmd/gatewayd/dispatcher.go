@@ -430,8 +430,13 @@ type commandIDPayload struct {
 	ProposalID string `json:"proposal_id"`
 }
 
+type commandApprovePayload struct {
+	ProposalID   string `json:"proposal_id"`
+	Confirmation string `json:"confirmation,omitempty"`
+}
+
 func (d *dispatcher) commandApprove(payload json.RawMessage) (any, *v1.ProtocolError) {
-	var p commandIDPayload
+	var p commandApprovePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, badPayload(err)
 	}
@@ -439,9 +444,10 @@ func (d *dispatcher) commandApprove(payload json.RawMessage) (any, *v1.ProtocolE
 	if err != nil {
 		return nil, badPayload(err)
 	}
-	if d.aw != nil {
-		_, _ = d.aw.Append(audit.Record{Kind: "transaction", Detail: tx.ID})
-	}
+	// %q keeps control characters escaped in the single-line audit detail. The
+	// confirmation is an operator-authored audit note, never target/secret data.
+	d.audit("approval", fmt.Sprintf("proposal=%s confirmation=%q", p.ProposalID, p.Confirmation))
+	d.audit("transaction", tx.ID)
 	if d.open != nil {
 		_ = d.open.add(tx.ID)
 	}
