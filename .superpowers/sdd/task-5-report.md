@@ -50,3 +50,34 @@ Passed all packages, including integration tests.
 - Confirmed invalid policy loading remains before lock/listener creation in daemon startup.
 - Confirmed all successfully created listeners are closed on signal, later-listener creation failure, or Serve error.
 - Confirmed approval audit ordering and backward-compatible optional confirmation payload.
+
+## Review-finding fixes
+
+### RED evidence
+
+Added focused regressions for the follow-up review findings. The initial run failed to compile because the explicit confirmation bound did not exist:
+
+```text
+cmd/gateway/main_test.go:87:95: undefined: maxConfirmationBytes
+cmd/gatewayd/dispatcher_test.go:388:185: undefined: maxConfirmationBytes
+```
+
+After introducing the first concurrent-close implementation, lifecycle tests exposed a deferred-slice capture bug and the real held-client test proved listeners were not closing:
+
+```text
+--- FAIL: TestShutdownClosesEveryListenerBeforeWaitingForHeldClient
+    listener remained open: .../gatewayd.control.sock
+```
+
+The root cause was that `defer servers.Close()` evaluated the empty slice before listeners were appended. Deferring a closure over the final group fixed the issue.
+
+### GREEN evidence
+
+- Confirmation notes are limited to 4096 bytes in both CLI and dispatcher.
+- Audit records persist only `confirmation=[redacted] bytes=N`; tests use secret/token/control-character content and assert none is retained.
+- Oversized server requests remain pending and create no audit record.
+- Diagnostic command display errors return before dialing.
+- Listener close starts concurrently for every server; a real held-open control client no longer leaves attach/diagnose listeners accepting connections, and shutdown completes after the held client closes.
+- A nil `Serve` return is reported as an unexpected listener failure.
+
+Focused race and full-suite commands are recorded in the final task handoff.

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,6 +125,102 @@ func TestServeDaemonSocketsClosesAllOnServerError(t *testing.T) {
 		default:
 			t.Fatal("server not closed")
 		}
+	}
+}
+
+func TestServeDaemonSocketsTreatsNilServeReturnAsFailure(t *testing.T) {
+	var servers []*fakeDaemonServer
+	created := make(chan struct{}, 2)
+	listen := func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error) {
+		s := newFakeDaemonServer()
+		servers = append(servers, s)
+		created <- struct{}{}
+		return s, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(t.TempDir(), false, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+	}()
+	for i := 0; i < 2; i++ {
+		<-created
+	}
+	servers[0].serve <- nil
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "unexpectedly") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nil Serve return did not notify supervisor")
+	}
+}
+
+func TestShutdownClosesEveryListenerBeforeWaitingForHeldClient(t *testing.T) {
+	dir := t.TempDir()
+	stop := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(dir, true, nil, stop,
+			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
+				return ipc.Listen(path, role, dispatch)
+			},
+			log.New(io.Discard, "", 0))
+	}()
+	paths := []string{filepath.Join(dir, "gatewayd.control.sock"), filepath.Join(dir, "gatewayd.attach.sock"), filepath.Join(dir, "gatewayd.diagnose.sock")}
+	for _, path := range paths {
+		for deadline := time.Now().Add(time.Second); ; {
+			if _, err := os.Stat(path); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("socket did not start: %s", path)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	held, err := net.Dial("unix", paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Complete one frame so the server has definitely accepted the connection
+	// and its per-connection goroutine is waiting for the next frame.
+	if _, err := held.Write([]byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bufio.NewReader(held).ReadBytes('\n'); err != nil {
+		t.Fatal(err)
+	}
+	stop <- os.Interrupt
+	for _, path := range paths {
+		closed := false
+		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+			conn, err := net.Dial("unix", path)
+			if err != nil {
+				closed = true
+				break
+			}
+			conn.Close()
+			time.Sleep(time.Millisecond)
+		}
+		if !closed {
+			t.Fatalf("listener remained open: %s", path)
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("shutdown returned before held client closed: %v", err)
+	default:
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not return after held client closed")
 	}
 }
 

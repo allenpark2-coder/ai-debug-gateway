@@ -435,18 +435,23 @@ type commandApprovePayload struct {
 	Confirmation string `json:"confirmation,omitempty"`
 }
 
+const maxConfirmationBytes = 4 * 1024
+
 func (d *dispatcher) commandApprove(payload json.RawMessage) (any, *v1.ProtocolError) {
 	var p commandApprovePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, badPayload(err)
 	}
+	if len(p.Confirmation) > maxConfirmationBytes {
+		return nil, badPayload(fmt.Errorf("confirmation exceeds %d bytes", maxConfirmationBytes))
+	}
 	tx, err := d.coord.Approve(p.ProposalID)
 	if err != nil {
 		return nil, badPayload(err)
 	}
-	// %q keeps control characters escaped in the single-line audit detail. The
-	// confirmation is an operator-authored audit note, never target/secret data.
-	d.audit("approval", fmt.Sprintf("proposal=%s confirmation=%q", p.ProposalID, p.Confirmation))
+	// Confirmation content is deliberately never persisted: it may contain a
+	// token or other secret copied from the operator's chat.
+	d.audit("approval", fmt.Sprintf("proposal=%s confirmation=[redacted] bytes=%d", p.ProposalID, len(p.Confirmation)))
 	d.audit("transaction", tx.ID)
 	if d.open != nil {
 		_ = d.open.add(tx.ID)
