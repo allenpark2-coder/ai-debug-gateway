@@ -24,6 +24,26 @@ import (
 // scheduling jitter.
 const producerBlockThreshold = 2 * time.Second
 
+// These mirror internal/gateway's own fixed bounds -- the transcript
+// ring's capacity (NewCoordinator's transcript.NewRing(1 << 20)) and
+// one subscriber's worst-case backlog (subscriberQueueSize events in
+// subscriber.go, each up to the read loop's 4096-byte buffer in
+// coordinator.go) -- duplicated here rather than imported, since
+// neither is exported from that package.
+const (
+	ringCapacityBytes     = 1 << 20
+	subscriberQueueEvents = 256
+	readLoopBufferBytes   = 4096
+)
+
+// ExpectedBaselineBytes is the fixed-size memory a Run's one
+// Coordinator and one subscriber can account for by construction: the
+// ring plus that subscriber's worst-case backlog. A caller checking
+// Metrics.PeakRSSBytes against a bound should add its own allowance
+// for runtime overhead (goroutine stacks, GC headroom, the Go
+// runtime itself) on top of this baseline.
+const ExpectedBaselineBytes = ringCapacityBytes + subscriberQueueEvents*readLoopBufferBytes
+
 // Config parameterizes one harness run.
 type Config struct {
 	// BytesPerSecond is the synthetic target output rate to feed.

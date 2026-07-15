@@ -26,11 +26,8 @@ vet:
 verify: build fmt vet race windows-boundary
 	go build ./cmd/gateway ./cmd/gatewayd
 
-# gateway-bench's defaults already are the release gate: 10 MiB/s of
-# synthetic target output for 30s, failing if human input latency's
-# p99 reaches 100ms.
 perf:
-	go run ./cmd/gateway-bench
+	go run ./cmd/gateway-bench -rate 10MiB -duration 30s -max-p99 100ms -runtime-overhead 64MiB
 
 clean:
 	rm -rf dist
