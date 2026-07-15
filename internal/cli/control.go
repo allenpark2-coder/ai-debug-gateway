@@ -62,8 +62,39 @@ func (c *Client) PortsList() (json.RawMessage, error) {
 // SessionStart starts a session for board (empty uses the daemon's
 // default board).
 func (c *Client) SessionStart(board string) (json.RawMessage, error) {
+	return c.SessionStartWithOptions(board, SessionStartOptions{})
+}
+
+// SessionStartOptions carries session.start fields beyond the board
+// name: which transport to use when a profile configures both, and
+// SSH-only secrets entered for this one connection attempt (never
+// persisted). SSHAcceptHost is only ever honored by the daemon on an
+// attach connection; a control connection cannot accept a new host
+// key regardless of this field.
+type SessionStartOptions struct {
+	Transport         string
+	SSHPassword       string
+	SSHKeyPassphrases map[string]string
+	SSHAcceptHost     bool
+}
+
+// SessionStartWithOptions starts a session for board with opts.
+func (c *Client) SessionStartWithOptions(board string, opts SessionStartOptions) (json.RawMessage, error) {
 	var out json.RawMessage
-	err := c.Call(v1.OpSessionStart, map[string]string{"board": board}, &out)
+	payload := map[string]any{"board": board}
+	if opts.Transport != "" {
+		payload["transport"] = opts.Transport
+	}
+	if opts.SSHPassword != "" {
+		payload["ssh_password"] = opts.SSHPassword
+	}
+	if len(opts.SSHKeyPassphrases) > 0 {
+		payload["ssh_key_passphrases"] = opts.SSHKeyPassphrases
+	}
+	if opts.SSHAcceptHost {
+		payload["ssh_accept_host"] = true
+	}
+	err := c.Call(v1.OpSessionStart, payload, &out)
 	return out, err
 }
 

@@ -50,7 +50,19 @@ func main() {
 		}
 	case "start":
 		board := flagValue(args, "--board")
-		runControl(controlSock, func(c *cli.Client) error { return printResult(c.SessionStart(board)) })
+		opts := cli.SessionStartOptions{
+			Transport:     flagValue(args, "--transport"),
+			SSHPassword:   flagValue(args, "--ssh-password"),
+			SSHAcceptHost: hasFlag(args, "--ssh-accept-host"),
+		}
+		if opts.Transport == "ssh" && opts.SSHPassword == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+			opts.SSHPassword = promptPassword("SSH password (leave blank to skip)")
+		}
+		// Dialed on the attach socket, not control: host-key
+		// acceptance for a brand new host only ever succeeds on an
+		// attach connection, and an operator typing this command is,
+		// by definition, at an interactive terminal.
+		runControl(attachSock, func(c *cli.Client) error { return printResult(c.SessionStartWithOptions(board, opts)) })
 	case "status":
 		runControl(controlSock, func(c *cli.Client) error { return printResult(c.SessionStatus()) })
 	case "output":
@@ -80,7 +92,8 @@ func usage() {
 commands:
   ports                                    list discovered serial ports
   profile create                           interactively create a board profile
-  start [--board NAME]                     start a session
+  start [--board NAME] [--transport uart|ssh] [--ssh-password PW] [--ssh-accept-host]
+                                            start a session
   status                                   report session state
   output --after N                         read console output after sequence N
   propose --session ID --text TEXT --purpose P --timeout-ms MS
@@ -95,6 +108,29 @@ func flagValue(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func hasFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
+// promptPassword reads a password from the terminal without echoing
+// it. It returns "" (never an error) if reading fails or the human
+// left it blank, matching the "leave blank to skip" flows that call
+// it: a blank password just means this method is not being used.
+func promptPassword(label string) string {
+	fmt.Fprintf(os.Stderr, "%s: ", label)
+	b, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func parseUint(s string) uint64 {

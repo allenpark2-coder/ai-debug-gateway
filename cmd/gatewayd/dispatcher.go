@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -14,6 +15,7 @@ import (
 	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport/serial"
+	sshtransport "github.com/allenpark2-coder/ai-debug-gateway/internal/transport/ssh"
 )
 
 // defaultRetentionLimit bounds how many durable records records.export
@@ -40,6 +42,11 @@ type dispatcher struct {
 	// real serial package.
 	listPorts func() ([]serial.Port, error)
 	openPort  func(serial.Port, serial.LineSettings) (transport.Stream, error)
+
+	// dialSSH is overridden in tests to avoid a real known_hosts file
+	// and network dial; production code leaves it nil and falls back
+	// to a real host-key verifier, a real auth factory, and ssh.Open.
+	dialSSH func(prof *profile.SSHConfig, auth sshtransport.HumanAuth) (transport.Stream, error)
 }
 
 func newDispatcher(board, profileDir string, coord *gateway.Coordinator, open *openSet, aw *audit.Writer, tw *transcript.Writer, loginCfg gateway.LoginConfig) *dispatcher {
@@ -69,6 +76,17 @@ func (d *dispatcher) doOpenPort(p serial.Port, line serial.LineSettings) (transp
 	return serial.Open(p, line)
 }
 
+func (d *dispatcher) doDialSSH(prof *profile.SSHConfig, auth sshtransport.HumanAuth) (transport.Stream, error) {
+	if d.dialSSH != nil {
+		return d.dialSSH(prof, auth)
+	}
+	verifier, err := sshtransport.NewHostKeyVerifier(prof.KnownHostsFile)
+	if err != nil {
+		return nil, err
+	}
+	return sshtransport.Open(context.Background(), prof, verifier, sshtransport.NewAuthFactory(), auth)
+}
+
 func badPayload(err error) *v1.ProtocolError {
 	return &v1.ProtocolError{Code: v1.ErrCodeInvalidPayload, Message: err.Error()}
 }
@@ -85,7 +103,7 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 	case v1.OpPortsList:
 		return d.portsList()
 	case v1.OpSessionStart:
-		return d.sessionStart(req.Payload)
+		return d.sessionStart(role, req.Payload)
 	case v1.OpSessionStatus:
 		return d.sessionStatus()
 	case v1.OpSessionEnd:
@@ -130,10 +148,20 @@ func (d *dispatcher) portsList() (any, *v1.ProtocolError) {
 }
 
 type sessionStartPayload struct {
-	Board string `json:"board"`
+	Board     string `json:"board"`
+	Transport string `json:"transport,omitempty"` // "uart" or "ssh"; required only when a profile configures both
+
+	// SSH-only: never persisted, only ever entered interactively for
+	// this one connection attempt.
+	SSHPassword       string            `json:"ssh_password,omitempty"`
+	SSHKeyPassphrases map[string]string `json:"ssh_key_passphrases,omitempty"`
+	// SSHAcceptHost is honored only on an attach (human) connection; a
+	// control (AI) connection can never accept a new host key, per
+	// internal/transport/ssh's HumanToken model.
+	SSHAcceptHost bool `json:"ssh_accept_host,omitempty"`
 }
 
-func (d *dispatcher) sessionStart(payload json.RawMessage) (any, *v1.ProtocolError) {
+func (d *dispatcher) sessionStart(role ipc.Role, payload json.RawMessage) (any, *v1.ProtocolError) {
 	var p sessionStartPayload
 	if len(payload) > 0 {
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -148,8 +176,30 @@ func (d *dispatcher) sessionStart(payload json.RawMessage) (any, *v1.ProtocolErr
 	if err != nil {
 		return nil, badPayload(fmt.Errorf("loading profile %q: %w", p.Board, err))
 	}
+
+	kind := p.Transport
+	switch {
+	case kind == "" && prof.UART != nil && prof.SSH == nil:
+		kind = "uart"
+	case kind == "" && prof.SSH != nil && prof.UART == nil:
+		kind = "ssh"
+	case kind == "":
+		return nil, badPayload(fmt.Errorf("profile %q configures both UART and SSH; specify which transport to start", p.Board))
+	}
+
+	switch kind {
+	case "uart":
+		return d.startUARTSession(prof)
+	case "ssh":
+		return d.startSSHSession(role, prof, p)
+	default:
+		return nil, badPayload(fmt.Errorf("unknown transport %q", kind))
+	}
+}
+
+func (d *dispatcher) startUARTSession(prof profile.Profile) (any, *v1.ProtocolError) {
 	if prof.UART == nil {
-		return nil, badPayload(fmt.Errorf("profile %q has no UART configuration", p.Board))
+		return nil, badPayload(fmt.Errorf("profile %q has no UART configuration", prof.Name))
 	}
 
 	opener := func() (transport.Stream, error) {
@@ -169,6 +219,44 @@ func (d *dispatcher) sessionStart(payload json.RawMessage) (any, *v1.ProtocolErr
 		return nil, internalErr(err)
 	}
 	if err := d.coord.StartUART(stream, d.loginCfg, opener); err != nil {
+		stream.Close()
+		return nil, internalErr(err)
+	}
+
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) startSSHSession(role ipc.Role, prof profile.Profile, p sessionStartPayload) (any, *v1.ProtocolError) {
+	if prof.SSH == nil {
+		return nil, badPayload(fmt.Errorf("profile %q has no SSH configuration", prof.Name))
+	}
+
+	secrets := sshtransport.HumanSecrets{}
+	if p.SSHPassword != "" {
+		secrets.Password = []byte(p.SSHPassword)
+	}
+	if len(p.SSHKeyPassphrases) > 0 {
+		secrets.KeyPassphrases = make(map[string][]byte, len(p.SSHKeyPassphrases))
+		for path, pass := range p.SSHKeyPassphrases {
+			secrets.KeyPassphrases[path] = []byte(pass)
+		}
+	}
+
+	auth := sshtransport.HumanAuth{Secrets: secrets}
+	if role == ipc.RoleAttach && p.SSHAcceptHost {
+		auth.AcceptHost = true
+		auth.Token = sshtransport.GrantHumanToken()
+	}
+
+	opener := func() (transport.Stream, error) {
+		return d.doDialSSH(prof.SSH, auth)
+	}
+
+	stream, err := opener()
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	if err := d.coord.StartSSH(stream, opener); err != nil {
 		stream.Close()
 		return nil, internalErr(err)
 	}
