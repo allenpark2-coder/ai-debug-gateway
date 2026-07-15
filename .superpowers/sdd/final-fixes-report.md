@@ -40,3 +40,15 @@ All completed with exit status 0.
   remain AI-disabled.
 - Exact board-policy argv extensions can open files internally; installing
   such an extension is intentionally an operator trust decision.
+
+## Final lifecycle follow-up
+
+- `resyncPending` is now scoped to one transport generation: successful fresh
+  starts and SSH retries clear it. Tests cover SSH timeout, disconnect,
+  operator retry, and immediate eligibility of the new shell, plus a fresh
+  session that must not inherit stale resynchronization state.
+- Dispatcher/coordinator teardown is now a centralized LIFO defer in the socket
+  supervisor. It runs before server `Close` waits on handlers for signal exits,
+  unexpected listener errors, and startup/partial-start returns alike. A
+  blocking-handler regression test proves an unrelated listener error cannot
+  deadlock teardown and that shutdown releases the in-flight dispatch.

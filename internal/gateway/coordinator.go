@@ -182,6 +182,7 @@ func (c *Coordinator) start(stream transport.Stream, cfg LoginConfig, opener Ope
 	c.opener = opener
 	c.usernameSent = false
 	c.manualReady = false
+	c.resyncPending = false
 	_ = c.sess.Apply(session.Connect)
 	_ = c.sess.Apply(session.TransportReady)
 	if alreadyAuthenticated {
@@ -241,6 +242,7 @@ func (c *Coordinator) retry(alreadyAuthenticated bool) error {
 	c.stream = newStream
 	c.usernameSent = false
 	c.manualReady = false
+	c.resyncPending = false
 	_ = c.sess.Apply(session.TransportReady)
 	if alreadyAuthenticated {
 		_ = c.sess.Apply(session.Authenticated)

@@ -221,6 +221,13 @@ func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispa
 	}
 	servers := make(listenerGroup, 0, len(specs))
 	defer func() { retErr = errors.Join(retErr, servers.Close()) }()
+	// This defer is registered after server Close, so LIFO teardown always
+	// stops/cancels daemon work before waiting for connection handlers.
+	defer func() {
+		if shutdown, ok := disp.(daemonShutdown); ok {
+			shutdown.Shutdown()
+		}
+	}()
 	for _, spec := range specs {
 		srv, err := listen(spec.path, spec.role, disp)
 		if err != nil {
@@ -247,9 +254,6 @@ func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispa
 	select {
 	case <-stop:
 		logger.Print("gatewayd: shutting down")
-		if shutdown, ok := disp.(daemonShutdown); ok {
-			shutdown.Shutdown()
-		}
 		return nil
 	case err := <-errs:
 		return err

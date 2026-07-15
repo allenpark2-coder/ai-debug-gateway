@@ -15,6 +15,7 @@ import (
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
+	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
 )
 
 type syncBuffer struct {
@@ -33,6 +34,34 @@ type fakeDaemonServer struct {
 	serve  chan error
 	closed chan struct{}
 }
+
+type shutdownDispatcher struct{ called chan struct{} }
+
+func (d *shutdownDispatcher) Dispatch(ipc.Role, v1.Request) (any, *v1.ProtocolError) {
+	<-d.called
+	return nil, nil
+}
+func (d *shutdownDispatcher) Shutdown() {
+	select {
+	case <-d.called:
+	default:
+		close(d.called)
+	}
+}
+
+type blockingHandlerServer struct {
+	disp    ipc.Dispatcher
+	started chan struct{}
+	done    chan struct{}
+}
+
+func (s *blockingHandlerServer) Serve() error {
+	close(s.started)
+	s.disp.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute})
+	close(s.done)
+	return nil
+}
+func (s *blockingHandlerServer) Close() error { <-s.done; return nil }
 
 func newFakeDaemonServer() *fakeDaemonServer {
 	return &fakeDaemonServer{serve: make(chan error, 1), closed: make(chan struct{})}
@@ -154,6 +183,43 @@ func TestServeDaemonSocketsClosesAllOnServerError(t *testing.T) {
 		default:
 			t.Fatal("server not closed")
 		}
+	}
+}
+
+func TestServeDaemonSocketsShutsDispatcherBeforeWaitingHandlersOnListenerError(t *testing.T) {
+	disp := &shutdownDispatcher{called: make(chan struct{})}
+	created := make(chan struct{}, 2)
+	blocking := &blockingHandlerServer{disp: disp, started: make(chan struct{}), done: make(chan struct{})}
+	failing := newFakeDaemonServer()
+	count := 0
+	listen := func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error) {
+		count++
+		created <- struct{}{}
+		if count == 1 {
+			return blocking, nil
+		}
+		return failing, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(t.TempDir(), "board", false, disp, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+	}()
+	<-created
+	<-created
+	<-blocking.started
+	failing.serve <- errors.New("listener failed")
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "listener failed") {
+			t.Fatalf("err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener-error teardown did not shut dispatcher before waiting")
+	}
+	select {
+	case <-disp.called:
+	default:
+		t.Fatal("dispatcher was not shut down")
 	}
 }
 
