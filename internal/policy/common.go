@@ -190,9 +190,6 @@ func validatePaths(command string, paths []string) Decision {
 }
 
 func unsafePath(name string) string {
-	if reason := unsafeProcAlias(name); reason != "" {
-		return reason
-	}
 	clean := path.Clean(name)
 	lower := strings.ToLower(clean)
 	relative := lower
@@ -200,19 +197,17 @@ func unsafePath(name string) string {
 		relative = strings.TrimPrefix(relative, "../")
 	}
 	relative = strings.TrimPrefix(strings.TrimPrefix(relative, "./"), "/")
+	if reason := unsafePseudoFilesystemPath(relative); reason != "" {
+		return reason
+	}
 	if contains([]string{"etc/shadow", "etc/gshadow", "etc/passwd-", "etc/shadow-"}, relative) {
 		return "password database reads are not allowed"
 	}
 	base := path.Base(lower)
-	if (strings.Contains("/"+relative, "/.ssh/") && (strings.HasPrefix(base, "id_") || base == "authorized_keys")) ||
+	if (strings.Contains("/"+relative, "/.ssh/") &&
+		((strings.HasPrefix(base, "id_") && !strings.HasSuffix(base, ".pub")) || base == "authorized_keys")) ||
 		(strings.HasPrefix(base, "ssh_host_") && strings.HasSuffix(base, "_key")) {
 		return "SSH key material reads are not allowed"
-	}
-	if strings.HasPrefix(relative, "proc/") && (base == "environ" || base == "mem") {
-		return "process secrets or memory reads are not allowed"
-	}
-	if strings.HasPrefix(lower, "/dev/") && clean != "/dev/null" {
-		return "device-node reads are not allowed"
 	}
 	if strings.Contains(lower, "ai-debug-gateway") || strings.Contains(lower, "/gatewayd/") {
 		return "gateway state reads are not allowed"
@@ -220,33 +215,27 @@ func unsafePath(name string) string {
 	return ""
 }
 
-func unsafeProcAlias(name string) string {
-	parts := make([]string, 0, 4)
-	for _, part := range strings.Split(strings.ToLower(name), "/") {
-		switch part {
-		case "", ".":
-			continue
-		case "..":
-			if len(parts) > 0 {
-				parts = parts[:len(parts)-1]
-			}
-			continue
+func unsafePseudoFilesystemPath(relative string) string {
+	parts := strings.Split(relative, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	switch parts[0] {
+	case "proc":
+		allowed := []string{
+			"proc/cpuinfo", "proc/meminfo", "proc/uptime", "proc/loadavg",
+			"proc/version", "proc/filesystems", "proc/mounts",
 		}
-		if len(parts) == 2 && parts[0] == "proc" && isProcProcess(parts[1]) {
-			switch part {
-			case "root":
-				return "process root aliases are not allowed"
-			case "fd":
-				return "process file-descriptor aliases are not allowed"
-			}
+		if contains(allowed, relative) {
+			return ""
 		}
-		parts = append(parts, part)
+		return "procfs reads are limited to explicitly allowlisted global diagnostics"
+	case "sys":
+		return "sysfs reads are not allowlisted"
+	case "dev":
+		return "device-node reads are not allowed"
 	}
 	return ""
-}
-
-func isProcProcess(value string) bool {
-	return value == "self" || value == "thread-self" || isDecimal(value)
 }
 
 func sedCommand(argv []string) Decision {
