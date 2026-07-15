@@ -45,7 +45,19 @@ func Common() *Policy {
 	p.commands["printf"] = literalOutput("printf")
 	p.commands["command"] = lookupCommand("command")
 	p.commands["type"] = lookupCommand("type")
+	for executable, validate := range p.commands {
+		p.commands[executable] = withInformationOptions(executable, validate)
+	}
 	return p
+}
+
+func withInformationOptions(command string, validate validator) validator {
+	return func(argv []string) Decision {
+		if len(argv) == 2 && (argv[1] == "--help" || argv[1] == "--version") {
+			return allow("command." + command + ".information")
+		}
+		return validate(argv)
+	}
 }
 
 func exactOptions(command string, options []string) validator {
