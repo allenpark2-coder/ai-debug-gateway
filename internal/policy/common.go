@@ -190,6 +190,9 @@ func validatePaths(command string, paths []string) Decision {
 }
 
 func unsafePath(name string) string {
+	if reason := unsafeProcAlias(name); reason != "" {
+		return reason
+	}
 	clean := path.Clean(name)
 	lower := strings.ToLower(clean)
 	relative := lower
@@ -202,7 +205,7 @@ func unsafePath(name string) string {
 	}
 	base := path.Base(lower)
 	if (strings.Contains("/"+relative, "/.ssh/") && (strings.HasPrefix(base, "id_") || base == "authorized_keys")) ||
-		base == "ssh_host_rsa_key" || base == "ssh_host_ecdsa_key" || base == "ssh_host_ed25519_key" {
+		(strings.HasPrefix(base, "ssh_host_") && strings.HasSuffix(base, "_key")) {
 		return "SSH key material reads are not allowed"
 	}
 	if strings.HasPrefix(relative, "proc/") && (base == "environ" || base == "mem") {
@@ -215,6 +218,35 @@ func unsafePath(name string) string {
 		return "gateway state reads are not allowed"
 	}
 	return ""
+}
+
+func unsafeProcAlias(name string) string {
+	parts := make([]string, 0, 4)
+	for _, part := range strings.Split(strings.ToLower(name), "/") {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+			continue
+		}
+		if len(parts) == 2 && parts[0] == "proc" && isProcProcess(parts[1]) {
+			switch part {
+			case "root":
+				return "process root aliases are not allowed"
+			case "fd":
+				return "process file-descriptor aliases are not allowed"
+			}
+		}
+		parts = append(parts, part)
+	}
+	return ""
+}
+
+func isProcProcess(value string) bool {
+	return value == "self" || value == "thread-self" || isDecimal(value)
 }
 
 func sedCommand(argv []string) Decision {
