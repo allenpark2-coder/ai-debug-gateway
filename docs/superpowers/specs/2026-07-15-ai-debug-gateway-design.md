@@ -194,8 +194,8 @@ Each completed transaction reports:
 - exit code when the shell marker was observed;
 - duration;
 - one of `completed`, `timeout`, `disconnected`, `interrupted-by-user`,
-  `protocol-error`, or `daemon-restarted`; only a recovered daemon uses
-  `daemon-restarted` to finalize an interrupted durable record;
+  `protocol-error`, `target-rebooted`, or `daemon-restarted`; only a recovered
+  daemon uses `daemon-restarted` to finalize an interrupted durable record;
 - bounded transcript context before and after execution.
 
 Daemon restart or crash invalidates every pending proposal and marks every
@@ -237,6 +237,35 @@ output and recognizes configurable login, password, and shell-prompt patterns.
 At `login:` it may submit the profile username. If the target then presents a
 shell prompt, authentication is complete. If it presents `Password:`, the
 gateway pauses and requests hidden human input.
+
+A target reboot and loss of the host serial transport are different events. If
+the serial file descriptor remains usable while boot output restarts, the
+daemon keeps the transport and session ID, terminates an active transaction as
+`target-rebooted`, invalidates pending proposals, clears assumed shell state,
+and returns to `AUTHENTICATING`. A configured boot-banner pattern establishes
+the reboot event; without such evidence an unfinished transaction follows its
+normal timeout rule. The daemon does not enter `RECONNECTING` merely because
+the target rebooted.
+
+Removal of the USB-serial adapter, device hangup, or a terminal I/O error such
+as `ENODEV` or persistent `EIO` is transport loss. It closes the unusable file
+descriptor and enters `RECONNECTING`, applying the common transaction and
+proposal invalidation rules. Device reappearance is reported to the human but
+does not by itself reopen the port.
+
+The interactive operation `retry uart` is the human-approved retry for this
+transport. It rescans ports and first attempts to match the profile's stable
+USB identity, including `/dev/serial/by-id` identity or USB serial number when
+available. It then opens the matched device with the profile's saved baud,
+line, and flow-control settings. A successful open allocates a new session ID
+and proceeds through `CONNECTING` and `AUTHENTICATING`; no proposal, command,
+or prior shell state is restored.
+
+The gateway must not silently accept a reused `/dev/ttyUSB*` path when its USB
+identity differs. If identity is unavailable, changed, or matches multiple
+ports, `retry uart` stops and requires the human to select and confirm the
+device. Failed opens remain in `RECONNECTING` for bounded human-requested
+retries; cancellation or retry exhaustion follows the common state machine.
 
 If the prompt cannot be recognized, raw human terminal access remains
 available, but AI transactions stay disabled until the human confirms the
@@ -350,6 +379,8 @@ Unit tests use fake transports and deterministic clocks to cover:
 - proposal expiry, single-use approval, rejection, and session invalidation;
 - proposal-to-transaction ID linkage and immutable command snapshots;
 - timeout, reconnect paths, disconnect, Ctrl-C, and human takeover;
+- target reboot without UART reopen, USB-serial removal, identity-safe
+  `retry uart`, ambiguous-device refusal, and new-session allocation;
 - invalidation and prevention of replay after daemon restart;
 - managed-command validation, nonce matching, and marker extraction;
 - rejection of multiline, unbalanced, heredoc, and background commands;
@@ -360,9 +391,10 @@ Unit tests use fake transports and deterministic clocks to cover:
 
 Linux integration tests use pseudo-terminals to simulate a UART target,
 including boot output, `login:`, optional `Password:`, shell prompts, reboot,
-large output bursts, and disconnects. SSH integration tests run against a
-controlled local test server and cover PTY state, key/password authentication,
-known-host behavior, and reconnect semantics.
+large output bursts, transport hangup, disappearance, reappearance, and device
+identity mismatch. SSH integration tests run against a controlled local test
+server and cover PTY state, key/password authentication, known-host behavior,
+and reconnect semantics.
 
 Hardware acceptance is divided into:
 
@@ -370,7 +402,9 @@ Hardware acceptance is divided into:
    and the normative responsiveness test defined above;
 2. target reboot, boot-log capture, username-only login, and password login
    with verified secret omission;
-3. SSH key/agent and password login, repeated commands, disconnect reporting,
+3. USB-serial unplug/replug, explicit retry, identity mismatch refusal, and
+   recovery under a new session ID;
+4. SSH key/agent and password login, repeated commands, disconnect reporting,
    and approved reconnect.
 
 ## Deferred work
