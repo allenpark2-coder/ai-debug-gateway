@@ -362,9 +362,7 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 		}
 	}
 	d.audit("proposal", tx.SourceProposalID)
-	if err == nil {
-		d.audit("auto-readonly-approval", tx.SourceProposalID)
-	}
+	d.audit("auto-readonly-approval", tx.SourceProposalID)
 	out.Transaction = tx
 	d.audit("transaction", tx.ID)
 	if d.open != nil {

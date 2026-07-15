@@ -51,3 +51,17 @@ Fresh review verification:
 - `GOCACHE=/tmp/ai-debug-gateway-go-cache go test -race ./internal/gateway ./cmd/gatewayd` — PASS
 - `GOCACHE=/tmp/ai-debug-gateway-go-cache go test ./...` — PASS
 - `git diff --check` — PASS
+
+## Final review follow-up
+
+The immediate-write-failure path now records the same approved lifecycle as every other non-nil transaction: `proposal`, `auto-readonly-approval`, `transaction`, then `result`. A nil transaction remains the only pre-approval failure signal. The write-failure dispatcher regression asserts the exact durable audit order.
+
+`finishActiveLocked` now explicitly copies `SourceProposalID` from the immutable active transaction into every terminal `command.Result`; the write-failure/waiter regression asserts this traceability through the common result path.
+
+Fresh verification:
+
+- `GOCACHE=/tmp/ai-debug-gateway-go-cache go test -race ./internal/gateway ./cmd/gatewayd` — PASS
+- `GOCACHE=/tmp/ai-debug-gateway-go-cache go test ./...` — PASS
+- `git diff --check` — PASS
+
+Inherited minor: transport `Stream.Write` remains synchronous while the coordinator lock is held. Redesigning potentially blocking transport writes is deliberately outside Task 4's review fix scope.
