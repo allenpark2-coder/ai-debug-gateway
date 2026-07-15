@@ -18,14 +18,15 @@ const MaxFrameBytes = 1 << 20 // 1 MiB
 // takeover, and host-key acceptance are deliberately absent from the
 // AI-capable control surface; only an attach connection may use them.
 const (
-	OpPortsList      = "ports.list"
-	OpSessionStart   = "session.start"
-	OpSessionStatus  = "session.status"
-	OpSessionEnd     = "session.end"
-	OpOutputRead     = "output.read"
-	OpCommandPropose = "command.propose"
-	OpCommandList    = "command.list"
-	OpRecordsExport  = "records.export"
+	OpPortsList       = "ports.list"
+	OpSessionStart    = "session.start"
+	OpSessionStatus   = "session.status"
+	OpSessionEnd      = "session.end"
+	OpOutputRead      = "output.read"
+	OpCommandPropose  = "command.propose"
+	OpCommandList     = "command.list"
+	OpRecordsExport   = "records.export"
+	OpDiagnoseExecute = "diagnose.execute"
 
 	OpCommandApprove = "command.approve"
 	OpCommandReject  = "command.reject"

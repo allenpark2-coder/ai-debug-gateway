@@ -133,6 +133,34 @@ func TestControlConnectionCanProposeAndReadOutput(t *testing.T) {
 	}
 }
 
+func TestDiagnoseRoleCapabilityMatrix(t *testing.T) {
+	allowed := []string{v1.OpSessionStatus, v1.OpOutputRead, v1.OpDiagnoseExecute}
+	denied := []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpRetryUART,
+		v1.OpSecretBegin, v1.OpSessionStart, v1.OpSessionEnd, v1.OpHostKeyAccept}
+
+	for _, op := range allowed {
+		if !permitted(RoleDiagnose, op) {
+			t.Errorf("diagnose operation %q: got denied, want allowed", op)
+		}
+	}
+	for _, op := range denied {
+		if permitted(RoleDiagnose, op) {
+			t.Errorf("diagnose operation %q: got allowed, want denied", op)
+		}
+	}
+	if permitted(RoleControl, v1.OpDiagnoseExecute) {
+		t.Error("control must not diagnose")
+	}
+	if permitted(RoleControl, v1.OpCommandApprove) {
+		t.Error("control must not approve")
+	}
+	for _, op := range append(append([]string{}, allowed...), denied...) {
+		if !permitted(RoleAttach, op) {
+			t.Errorf("attach operation %q: behavior changed to denied", op)
+		}
+	}
+}
+
 func TestAttachConnectionCanApprove(t *testing.T) {
 	path, _ := newTestServer(t, RoleAttach)
 	c, err := Dial(path)

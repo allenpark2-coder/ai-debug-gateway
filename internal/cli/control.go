@@ -3,8 +3,10 @@ package cli
 import (
 	"encoding/json"
 
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/command"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/id"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/policy"
 	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
 )
 
@@ -14,6 +16,23 @@ import (
 // type.
 type Client struct {
 	conn *ipc.Client
+}
+
+// DiagnoseRequest carries one policy-gated read-only diagnostic command.
+type DiagnoseRequest struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text"`
+	Purpose   string `json:"purpose"`
+	TimeoutMS int64  `json:"timeout_ms"`
+}
+
+// DiagnoseResult reports the policy decision and, when allowed, execution data.
+type DiagnoseResult struct {
+	Decision       policy.Decision      `json:"decision"`
+	Transaction    *command.Transaction `json:"transaction,omitempty"`
+	Result         *command.Result      `json:"result,omitempty"`
+	TruncatedStart bool                 `json:"truncated_start"`
+	TruncatedEnd   bool                 `json:"truncated_end"`
 }
 
 // Dial connects to the daemon socket at path.
@@ -116,6 +135,13 @@ func (c *Client) SessionEnd() (json.RawMessage, error) {
 func (c *Client) OutputRead(after uint64, max int) (json.RawMessage, error) {
 	var out json.RawMessage
 	err := c.Call(v1.OpOutputRead, map[string]any{"after": after, "max": max}, &out)
+	return out, err
+}
+
+// DiagnoseExecute evaluates and executes a read-only diagnostic command.
+func (c *Client) DiagnoseExecute(req DiagnoseRequest) (DiagnoseResult, error) {
+	var out DiagnoseResult
+	err := c.Call(v1.OpDiagnoseExecute, req, &out)
 	return out, err
 }
 
