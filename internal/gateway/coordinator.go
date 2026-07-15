@@ -103,6 +103,9 @@ type Coordinator struct {
 	opener        Opener
 	usernameSent  bool
 	manualReady   bool
+	// resyncPending keeps AI disabled after a timeout until the configured
+	// prompt proves that Ctrl-C returned the target to its shell.
+	resyncPending bool
 	// readerDone is closed when the current transport's reader
 	// goroutine fully exits, so EndSession can wait on exactly that
 	// goroutine (not the coordinator's whole lifetime, which
@@ -322,7 +325,7 @@ func (c *Coordinator) canStartLocked() error {
 	if c.stream == nil {
 		return ErrNotConnected
 	}
-	if c.sess.State() != session.Ready || c.secretW.Active() {
+	if c.sess.State() != session.Ready || c.secretW.Active() || c.resyncPending {
 		return ErrNotReady
 	}
 	if c.act != nil {
@@ -562,6 +565,9 @@ func (c *Coordinator) AIEnabled() bool {
 	if c.secretW.Active() {
 		return false
 	}
+	if c.resyncPending {
+		return false
+	}
 	switch c.sess.State() {
 	case session.Ready, session.RunningCommand:
 		return true
@@ -662,6 +668,11 @@ func (c *Coordinator) onData(chunk []byte) {
 	if cfg.BootBannerPattern != nil && cfg.BootBannerPattern.Match(chunk) &&
 		(state == session.Ready || state == session.RunningCommand) {
 		c.handleTargetRebootLocked()
+		return
+	}
+
+	if c.resyncPending && cfg.ShellPromptPattern != nil && cfg.ShellPromptPattern.Match(chunk) {
+		c.resyncPending = false
 		return
 	}
 
@@ -812,8 +823,18 @@ func (c *Coordinator) checkTimeout() {
 	if c.act == nil || time.Now().Before(c.act.deadline) {
 		return
 	}
+	if c.stream != nil {
+		_, _ = c.stream.Write([]byte{3})
+	}
 	c.finishActiveLocked(command.StatusTimeout, nil)
 	if c.sess.State() == session.RunningCommand {
 		_ = c.sess.Apply(session.CommandResult)
+	}
+	c.resyncPending = true
+	// SSH and transports without prompt recognition cannot prove shell
+	// resynchronization in-place. Disconnect so an operator-approved reconnect
+	// creates a fresh shell instead of leaving attribution ambiguous.
+	if c.loginCfg.ShellPromptPattern == nil && c.stream != nil {
+		_ = c.stream.Close()
 	}
 }

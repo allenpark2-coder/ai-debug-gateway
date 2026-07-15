@@ -237,19 +237,12 @@ func TestShutdownClosesEveryListenerBeforeWaitingForHeldClient(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		t.Fatalf("shutdown returned before held client closed: %v", err)
-	default:
-	}
-	if err := held.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
+		_ = held.Close()
 	case <-time.After(time.Second):
-		t.Fatal("shutdown did not return after held client closed")
+		t.Fatal("shutdown waited for idle client cooperation")
 	}
 }
 

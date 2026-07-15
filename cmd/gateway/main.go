@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/cli"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/command"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/profile"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport/serial"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/xdgpaths"
@@ -101,6 +102,9 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 		req := cli.DiagnoseRequest{SessionID: flagValue(args, "--session"), Text: flagValue(args, "--text"), Purpose: flagValue(args, "--purpose"), TimeoutMS: parseInt(flagValue(args, "--timeout-ms"))}
 		if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.Text) == "" || strings.TrimSpace(req.Purpose) == "" || req.TimeoutMS <= 0 {
 			return fmt.Errorf("diagnose requires nonempty --session, --text, --purpose, and positive --timeout-ms")
+		}
+		if req.TimeoutMS > command.MaxDiagnosticTimeoutMS {
+			return fmt.Errorf("diagnose --timeout-ms must not exceed %d", command.MaxDiagnosticTimeoutMS)
 		}
 		if _, err := fmt.Fprintln(stderr, req.Text); err != nil {
 			return fmt.Errorf("display diagnostic command: %w", err)

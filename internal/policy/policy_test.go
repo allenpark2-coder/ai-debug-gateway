@@ -7,7 +7,7 @@ func TestCommonPolicy(t *testing.T) {
 		text    string
 		allowed bool
 	}{
-		{`ps`, true}, {`cat /etc/os-release`, true},
+		{`ps`, true}, {`cat /etc/os-release`, false},
 		{`ip -brief address`, true}, {`dmesg | tail -n 20`, true},
 		{`echo x > /tmp/x`, false}, {`cat $(touch /tmp/pwn)`, false},
 		{`sh -c 'id'`, false}, {`find / -exec rm {} \;`, false},
@@ -80,7 +80,7 @@ func TestCommonPolicyAdversarialForms(t *testing.T) {
 		{"eval", `eval ps`, false},
 		{"printenv name", `printenv PATH`, true},
 		{"which tool", `which sh`, true},
-		{"sed print", `sed -n '1,20p' /var/log/messages`, true},
+		{"sed print", `sed -n '1,20p' /var/log/messages`, false},
 		{"sed write", `sed -n '1w /tmp/pwn' /etc/os-release`, false},
 	}
 	p := Common()
@@ -132,16 +132,13 @@ func TestCommonPolicyRejectsUnknownOptionsAndSecretOutput(t *testing.T) {
 func TestCommonPolicyAllowsExactDiagnosticForms(t *testing.T) {
 	tests := []string{
 		`ps -ef`, `free -m`, `uptime -p`, `df -h /`,
-		`printenv PATH LANG`, `head -n 20 /var/log/messages`,
-		`tail -c 128 /var/log/messages`, `wc -l /etc/os-release`,
+		`printenv PATH LANG`, `head -n 20 /proc/meminfo`,
+		`tail -c 128 /proc/version`, `wc -l /proc/mounts`,
 		`cat /proc/cpuinfo`, `cat /proc/meminfo`, `cat /proc/uptime`,
 		`head /proc/loadavg`, `cat /proc/version`, `cat /proc/filesystems`,
 		`cat /proc/mounts`, `ls -la /tmp`,
 		`stat -L /etc/os-release`, `du -sh /var/log`,
 		`ethtool -i eth0`,
-		`cat /home/operator/.ssh/id_ed25519.pub`,
-		`cat /etc/ssh/ssh_host_dsa_key.pub`,
-		`cat /etc/ssh/ssh_host_key.pub`,
 		`type -a sh`,
 		`ps --help`, `cat --version`, `ip --help`,
 	}

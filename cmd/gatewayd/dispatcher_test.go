@@ -46,7 +46,7 @@ func TestDiagnoseRejectsWithoutProposalOrWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, protoErr := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute,
-		Payload: mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "rm -rf /", TimeoutMS: 100})})
+		Payload: mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "rm -rf /", Purpose: "test rejection", TimeoutMS: 100})})
 	if protoErr != nil {
 		t.Fatal(protoErr)
 	}
@@ -62,6 +62,40 @@ func TestDiagnoseRejectsWithoutProposalOrWrite(t *testing.T) {
 	}
 }
 
+func TestDiagnoseValidatesRequiredFieldsAndTimeoutBeforePolicyOrWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    diagnoseExecutePayload
+	}{
+		{"empty session", diagnoseExecutePayload{Text: "uname", Purpose: "p", TimeoutMS: 1}},
+		{"empty text", diagnoseExecutePayload{SessionID: "s", Purpose: "p", TimeoutMS: 1}},
+		{"empty purpose", diagnoseExecutePayload{SessionID: "s", Text: "uname", TimeoutMS: 1}},
+		{"zero", diagnoseExecutePayload{SessionID: "s", Text: "uname", Purpose: "p"}},
+		{"negative", diagnoseExecutePayload{SessionID: "s", Text: "uname", Purpose: "p", TimeoutMS: -1}},
+		{"too large", diagnoseExecutePayload{SessionID: "s", Text: "uname", Purpose: "p", TimeoutMS: command.MaxDiagnosticTimeoutMS + 1}},
+		{"duration overflow", diagnoseExecutePayload{SessionID: "s", Text: "uname", Purpose: "p", TimeoutMS: int64(^uint64(0) >> 1)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDispatcher(t)
+			d.policy = policy.Common()
+			stream := newFakeCoordStream()
+			if err := d.coord.StartSSH(stream, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, protoErr := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute, Payload: mustJSON(t, tc.p)})
+			if protoErr == nil || protoErr.Code != v1.ErrCodeInvalidPayload {
+				t.Fatalf("error = %v", protoErr)
+			}
+			if len(stream.writtenSoFar()) != 0 {
+				t.Fatal("invalid request wrote target bytes")
+			}
+			if len(d.coord.PendingForSession(d.coord.SessionID())) != 0 {
+				t.Fatal("invalid request created proposal")
+			}
+		})
+	}
+}
+
 func TestDiagnoseExecutesAndReturnsOnlyTransactionOutput(t *testing.T) {
 	d := newTestDispatcher(t)
 	d.policy = policy.Common()
@@ -74,7 +108,7 @@ func TestDiagnoseExecutesAndReturnsOnlyTransactionOutput(t *testing.T) {
 	done := make(chan any, 1)
 	go func() {
 		r, e := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute,
-			Payload: mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", TimeoutMS: 1000})})
+			Payload: mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", Purpose: "inspect kernel", TimeoutMS: 1000})})
 		if e != nil {
 			done <- e
 			return
@@ -122,7 +156,7 @@ func TestConcurrentDiagnoseReturnsBusy(t *testing.T) {
 	if err := d.coord.StartSSH(stream, nil); err != nil {
 		t.Fatal(err)
 	}
-	payload := mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", TimeoutMS: 1000})
+	payload := mustJSON(t, diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", Purpose: "inspect kernel", TimeoutMS: 1000})
 	first := make(chan any, 1)
 	go func() {
 		r, e := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute, Payload: payload})
@@ -160,7 +194,7 @@ func TestDiagnoseWriteFailureReturnsTerminalResultAndConsistentAudit(t *testing.
 		t.Fatal(err)
 	}
 	raw, protoErr := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute, Payload: mustJSON(t,
-		diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", TimeoutMS: 1000})})
+		diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", Purpose: "inspect kernel", TimeoutMS: 1000})})
 	if protoErr != nil {
 		t.Fatal(protoErr)
 	}

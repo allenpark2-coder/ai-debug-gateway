@@ -88,6 +88,8 @@ type Server struct {
 	closeOnce sync.Once
 	quit      chan struct{}
 	wg        sync.WaitGroup
+	connMu    sync.Mutex
+	conns     map[net.Conn]struct{}
 }
 
 // Listen creates (or replaces a stale) owner-only (0600) Unix domain
@@ -106,7 +108,7 @@ func Listen(path string, role Role, dispatch Dispatcher) (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{role: role, dispatch: dispatch, listener: l, quit: make(chan struct{})}
+	s := &Server{role: role, dispatch: dispatch, listener: l, quit: make(chan struct{}), conns: make(map[net.Conn]struct{})}
 	// Added here, synchronously, before any goroutine exists to race a
 	// concurrent Close's Wait against; Serve balances this with Done.
 	s.wg.Add(1)
@@ -130,7 +132,17 @@ func (s *Server) Serve() error {
 				return err
 			}
 		}
+		s.connMu.Lock()
+		select {
+		case <-s.quit:
+			s.connMu.Unlock()
+			_ = conn.Close()
+			return nil
+		default:
+		}
+		s.conns[conn] = struct{}{}
 		s.wg.Add(1)
+		s.connMu.Unlock()
 		go s.handleConn(conn)
 	}
 }
@@ -140,13 +152,23 @@ func (s *Server) Serve() error {
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() { close(s.quit) })
 	err := s.listener.Close()
+	s.connMu.Lock()
+	for conn := range s.conns {
+		_ = conn.Close()
+	}
+	s.connMu.Unlock()
 	s.wg.Wait()
 	return err
 }
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.wg.Done()
-	defer conn.Close()
+	defer func() {
+		s.connMu.Lock()
+		delete(s.conns, conn)
+		s.connMu.Unlock()
+		_ = conn.Close()
+	}()
 
 	reader := bufio.NewReaderSize(conn, 4096)
 	writer := bufio.NewWriter(conn)

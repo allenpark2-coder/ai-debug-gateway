@@ -30,15 +30,17 @@ const defaultRetentionLimit = 5000
 // the durable audit/transcript stores and the open-transaction set
 // used to recover from a crash.
 type dispatcher struct {
-	board        string
-	profileDir   string
-	loginCfg     gateway.LoginConfig
-	coord        *gateway.Coordinator
-	open         *openSet
-	aw           *audit.Writer
-	tw           *transcript.Writer
-	policy       *policy.Policy
-	diagnosticMu sync.Mutex
+	board            string
+	profileDir       string
+	loginCfg         gateway.LoginConfig
+	coord            *gateway.Coordinator
+	open             *openSet
+	aw               *audit.Writer
+	tw               *transcript.Writer
+	policy           *policy.Policy
+	diagnosticMu     sync.Mutex
+	diagnosticCtx    context.Context
+	diagnosticCancel context.CancelFunc
 
 	retentionLimit int
 
@@ -55,17 +57,22 @@ type dispatcher struct {
 }
 
 func newDispatcher(board, profileDir string, coord *gateway.Coordinator, open *openSet, aw *audit.Writer, tw *transcript.Writer, loginCfg gateway.LoginConfig) *dispatcher {
+	diagnosticCtx, diagnosticCancel := context.WithCancel(context.Background())
 	return &dispatcher{
-		board:          board,
-		profileDir:     profileDir,
-		loginCfg:       loginCfg,
-		coord:          coord,
-		open:           open,
-		aw:             aw,
-		tw:             tw,
-		retentionLimit: defaultRetentionLimit,
+		board:            board,
+		profileDir:       profileDir,
+		loginCfg:         loginCfg,
+		coord:            coord,
+		open:             open,
+		aw:               aw,
+		tw:               tw,
+		retentionLimit:   defaultRetentionLimit,
+		diagnosticCtx:    diagnosticCtx,
+		diagnosticCancel: diagnosticCancel,
 	}
 }
+
+func (d *dispatcher) Shutdown() { d.coord.Stop(); d.diagnosticCancel() }
 
 func (d *dispatcher) doListPorts() ([]serial.Port, error) {
 	if d.listPorts != nil {
@@ -338,6 +345,12 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	if d.policy == nil {
 		return nil, internalErr(fmt.Errorf("diagnostic policy is disabled"))
 	}
+	if p.SessionID == "" || p.Text == "" || p.Purpose == "" {
+		return nil, badPayload(fmt.Errorf("session_id, text, and purpose must be nonempty"))
+	}
+	if p.TimeoutMS <= 0 || p.TimeoutMS > command.MaxDiagnosticTimeoutMS {
+		return nil, badPayload(fmt.Errorf("timeout_ms must be between 1 and %d", command.MaxDiagnosticTimeoutMS))
+	}
 	if !d.diagnosticMu.TryLock() {
 		return nil, badPayload(fmt.Errorf("diagnostic execution is busy"))
 	}
@@ -346,9 +359,6 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	out := diagnoseExecuteResult{Decision: decision}
 	if !decision.Allowed {
 		return out, nil
-	}
-	if p.SessionID == "" {
-		p.SessionID = d.coord.SessionID()
 	}
 	if p.SessionID != d.coord.SessionID() {
 		return nil, badPayload(fmt.Errorf("session is not current"))
@@ -368,7 +378,7 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	if d.open != nil {
 		_ = d.open.add(tx.ID)
 	}
-	res, waitErr := d.coord.WaitResult(context.Background(), tx.ID)
+	res, waitErr := d.coord.WaitResult(d.diagnosticCtx, tx.ID)
 	if waitErr != nil {
 		return nil, internalErr(waitErr)
 	}

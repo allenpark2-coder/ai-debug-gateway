@@ -14,7 +14,7 @@ func Common() *Policy {
 	p.commands["findmnt"] = exactOptions("findmnt", []string{"-a", "--all", "-l", "--list", "-r", "--raw", "-n", "--noheadings"})
 	p.commands["ss"] = exactOptions("ss", []string{"-a", "-l", "-n", "-t", "-u", "-x", "-4", "-6", "-s"})
 	p.commands["netstat"] = exactOptions("netstat", []string{"-a", "-l", "-n", "-r", "-s", "-t", "-u", "-x", "-w"})
-	p.commands["logread"] = exactOptions("logread", []string{"-f", "-F", "-r"})
+	p.commands["logread"] = exactOptions("logread", []string{"-r"})
 	p.commands["uname"] = exactOptions("uname", []string{"-a", "-s", "-n", "-r", "-v", "-m", "-p", "-i", "-o"})
 	p.commands["id"] = exactOptionsWithOperands("id", []string{"-a", "-g", "-G", "-n", "-r", "-u", "-Z"})
 	p.commands["groups"] = exactOptionsWithOperands("groups", nil)
@@ -24,11 +24,10 @@ func Common() *Policy {
 	p.commands["which"] = exactOptionsWithOperands("which", []string{"-a"})
 	p.commands["mount"] = mountCommand
 	p.commands["dmesg"] = dmesgCommand
-	p.commands["cat"] = exactPathOptions("cat", []string{"-A", "-b", "-e", "-E", "-n", "-s", "-t", "-T", "-u", "-v"})
+	p.commands["cat"] = exactContentPathOptions("cat", []string{"-A", "-b", "-e", "-E", "-n", "-s", "-t", "-T", "-u", "-v"})
 	p.commands["head"] = headTailCommand("head")
 	p.commands["tail"] = headTailCommand("tail")
-	p.commands["wc"] = exactPathOptions("wc", []string{"-c", "--bytes", "-l", "--lines", "-m", "--chars", "-w", "--words", "-L", "--max-line-length"})
-	p.commands["readlink"] = exactPathOptions("readlink", []string{"-f", "--canonicalize", "-e", "--canonicalize-existing", "-m", "--canonicalize-missing", "-n", "--no-newline", "-q", "-s", "-v", "-z", "--zero"})
+	p.commands["wc"] = exactContentPathOptions("wc", []string{"-c", "--bytes", "-l", "--lines", "-m", "--chars", "-w", "--words", "-L", "--max-line-length"})
 	p.commands["ls"] = exactPathOptions("ls", []string{"-a", "-A", "-d", "-F", "-h", "-i", "-l", "-la", "-al", "-lh", "-hl", "-lah", "-alh", "-n", "-r", "-R", "-s", "-t", "-u"})
 	p.commands["stat"] = statCommand
 	p.commands["du"] = duCommand
@@ -104,6 +103,37 @@ func exactPathOptions(command string, options []string) validator {
 	}
 }
 
+// exactContentPathOptions permits target file content only from immutable,
+// kernel-defined proc facts. Normal filesystem paths are denied because the
+// daemon cannot resolve target-side symlinks or hard links before execution.
+func exactContentPathOptions(command string, options []string) validator {
+	base := exactPathOptions(command, options)
+	return func(argv []string) Decision {
+		if d := base(argv); !d.Allowed {
+			return d
+		}
+		seenPath := false
+		endOptions := false
+		for _, arg := range argv[1:] {
+			if arg == "--" && !endOptions {
+				endOptions = true
+				continue
+			}
+			if !endOptions && strings.HasPrefix(arg, "-") {
+				continue
+			}
+			seenPath = true
+			if !contains([]string{"/proc/cpuinfo", "/proc/meminfo", "/proc/uptime", "/proc/loadavg", "/proc/version", "/proc/filesystems", "/proc/mounts"}, path.Clean(arg)) {
+				return deny("path.content", "target file content is limited to exact kernel-defined proc facts")
+			}
+		}
+		if !seenPath && command == "cat" {
+			return deny("command.cat", "cat requires an allowed proc fact path")
+		}
+		return allow("command." + command)
+	}
+}
+
 func printenvCommand(argv []string) Decision {
 	allowed := []string{"PATH", "LANG", "LC_ALL", "TERM", "SHELL", "USER", "LOGNAME", "HOSTNAME", "TZ"}
 	if len(argv) < 2 {
@@ -140,7 +170,7 @@ func headTailCommand(command string) validator {
 			if strings.HasPrefix(arg, "-") {
 				return deny("command."+command, "unknown option is not allowed")
 			}
-			return validatePaths(command, argv[i:])
+			return exactContentPathOptions(command, nil)(append([]string{command}, argv[i:]...))
 		}
 		return allow("command." + command)
 	}
@@ -257,7 +287,7 @@ func sedCommand(argv []string) Decision {
 	if !safeSedPrintProgram(argv[2]) {
 		return deny("command.sed", "only numeric-address print programs are allowed")
 	}
-	return exactPathOptions("sed", nil)(append([]string{"sed"}, argv[3:]...))
+	return exactContentPathOptions("sed", nil)(append([]string{"sed"}, argv[3:]...))
 }
 
 func safeSedPrintProgram(program string) bool {
@@ -346,7 +376,7 @@ func mountCommand(argv []string) Decision {
 
 func dmesgCommand(argv []string) Decision {
 	for _, arg := range argv[1:] {
-		if !contains([]string{"-H", "--human", "-T", "--ctime", "-t", "--notime", "-x", "--decode", "-r", "--raw", "-k", "--kernel", "-u", "--userspace", "-w", "--follow"}, arg) {
+		if !contains([]string{"-H", "--human", "-T", "--ctime", "-t", "--notime", "-x", "--decode", "-r", "--raw", "-k", "--kernel", "-u", "--userspace"}, arg) {
 			return deny("command.dmesg", "unknown or state-changing dmesg options are not allowed")
 		}
 	}
