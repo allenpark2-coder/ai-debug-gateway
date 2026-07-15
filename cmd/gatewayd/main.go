@@ -5,6 +5,9 @@
 package main
 
 import (
+	"flag"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -17,8 +20,39 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/transcript"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/gateway"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/policy"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/xdgpaths"
 )
+
+type daemonOptions struct {
+	AutoReadonly bool
+}
+
+func parseDaemonOptions(args []string) (daemonOptions, error) {
+	var options daemonOptions
+	flags := flag.NewFlagSet("gatewayd", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.BoolVar(&options.AutoReadonly, "auto-readonly", false, "enable board diagnostic policy")
+	if err := flags.Parse(args); err != nil {
+		return daemonOptions{}, err
+	}
+	if flags.NArg() != 0 {
+		return daemonOptions{}, fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	return options, nil
+}
+
+func loadDaemonPolicy(options daemonOptions, configDir, board string) (*policy.Policy, error) {
+	base := policy.Common()
+	if !options.AutoReadonly {
+		return base, nil
+	}
+	loaded, err := policy.LoadFile(filepath.Join(configDir, "policies", board+".json"), base)
+	if err != nil {
+		return nil, fmt.Errorf("board policy for %q: %w", board, err)
+	}
+	return loaded, nil
+}
 
 // defaultLoginConfig is a reasonable first-release default for
 // recognizing a Linux console login sequence. A future release makes
@@ -76,6 +110,10 @@ func main() {
 }
 
 func run() error {
+	options, err := parseDaemonOptions(os.Args[1:])
+	if err != nil {
+		return err
+	}
 	board := os.Getenv("GATEWAYD_BOARD")
 	if board == "" {
 		board = "default"
@@ -89,6 +127,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Policies are deliberately loaded once during startup. The resulting
+	// snapshot is handed to diagnose functionality in the startup graph.
+	diagnosticPolicy, err := loadDaemonPolicy(options, d.Config, board)
+	if err != nil {
+		return err
+	}
+	_ = diagnosticPolicy
 
 	lock, err := acquireLock(filepath.Join(d.Data, "gatewayd.lock"))
 	if err != nil {

@@ -38,6 +38,7 @@ func (p *Policy) Evaluate(text string) Decision {
 
 	decision := allow("common")
 	callCount := 0
+	fileRuleUsed := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil || !decision.Allowed {
 			return false
@@ -77,6 +78,9 @@ func (p *Policy) Evaluate(text string) Decision {
 				return false
 			}
 			decision = p.evaluateArgv(argv)
+			if decision.Allowed && decision.Rule == "file.allow" {
+				fileRuleUsed = true
+			}
 			return decision.Allowed
 		default:
 			decision = deny("syntax.unsupported", fmt.Sprintf("unsupported shell syntax %T", node))
@@ -85,6 +89,9 @@ func (p *Policy) Evaluate(text string) Decision {
 	})
 	if decision.Allowed && callCount == 0 {
 		return deny("syntax.no-command", "input contains no command")
+	}
+	if decision.Allowed && fileRuleUsed && callCount != 1 {
+		return deny("file.exact", "board policy rules must be used as a single exact command")
 	}
 	return decision
 }
