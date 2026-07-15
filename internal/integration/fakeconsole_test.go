@@ -180,6 +180,15 @@ func (f *fakeConsole) handleCommandLine(line string) {
 	}
 
 	switch cmdText {
+	case "sudo do-a-thing":
+		// Deliberately never completes: security tests use this exact
+		// text to model a sudo prompt blocking a command indefinitely.
+		// Auto-completing it here, like any other unrecognized command,
+		// would emit "myboard $ " immediately after the test's own
+		// manually-injected secret prompt -- matching ShellPromptPattern
+		// and closing the secret window microseconds after it opened,
+		// racing the test's poll of it.
+		return
 	case "reboot":
 		// A real target takes real time to reboot; without some delay
 		// here the whole reboot -> re-authenticate cycle completes
