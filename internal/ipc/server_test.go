@@ -1,0 +1,179 @@
+package ipc
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
+)
+
+// echoDispatcher is a minimal Dispatcher for exercising the server's
+// framing and role enforcement without any real gateway wiring.
+type echoDispatcher struct{}
+
+func (echoDispatcher) Dispatch(role Role, req v1.Request) (any, *v1.ProtocolError) {
+	return map[string]string{"echo": req.Operation, "role": role.String()}, nil
+}
+
+func newTestServer(t *testing.T, role Role) (string, *Server) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gatewayd.sock")
+	s, err := Listen(path, role, echoDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Serve()
+	t.Cleanup(func() { s.Close() })
+	return path, s
+}
+
+func TestSocketModeIsOwnerOnly(t *testing.T) {
+	path, _ := newTestServer(t, RoleAttach)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("got mode %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestUnknownVersionRejected(t *testing.T) {
+	path, _ := newTestServer(t, RoleAttach)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	resp, err := c.Call(v1.Request{Version: "99", RequestID: "r1", Operation: v1.OpPortsList})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil || resp.Error.Code != v1.ErrCodeUnknownVersion {
+		t.Fatalf("%+v", resp)
+	}
+}
+
+func TestOversizedFrameRejected(t *testing.T) {
+	path, _ := newTestServer(t, RoleAttach)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	huge := bytes.Repeat([]byte("x"), v1.MaxFrameBytes+1)
+	if _, err := c.conn.Write(append(huge, '\n')); err != nil {
+		t.Fatal(err)
+	}
+
+	// The server's response frame is small; only the oversized request
+	// frame was rejected.
+	line, err := readFrame(c.reader, v1.MaxFrameBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp v1.Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil || resp.Error.Code != v1.ErrCodeFrameTooLarge {
+		t.Fatalf("got %+v, want frame_too_large", resp)
+	}
+}
+
+func TestControlConnectionCannotApproveOrWriteTransport(t *testing.T) {
+	path, _ := newTestServer(t, RoleControl)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	for _, op := range []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpSecretBegin, v1.OpRetryUART, v1.OpTakeover, v1.OpHostKeyAccept} {
+		resp, err := c.Call(v1.Request{Version: v1.Version, RequestID: op, Operation: op})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error == nil || resp.Error.Code != v1.ErrCodePermissionDenied {
+			t.Fatalf("operation %q: got %+v, want permission_denied", op, resp)
+		}
+	}
+}
+
+func TestControlConnectionCanProposeAndReadOutput(t *testing.T) {
+	path, _ := newTestServer(t, RoleControl)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	for _, op := range []string{v1.OpPortsList, v1.OpSessionStart, v1.OpSessionStatus, v1.OpSessionEnd, v1.OpOutputRead, v1.OpCommandPropose, v1.OpCommandList, v1.OpRecordsExport} {
+		resp, err := c.Call(v1.Request{Version: v1.Version, RequestID: op, Operation: op})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error != nil {
+			t.Fatalf("operation %q: unexpected error %+v", op, resp.Error)
+		}
+		var result map[string]string
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result["echo"] != op || !strings.Contains(result["role"], "control") {
+			t.Fatalf("operation %q: got %+v", op, result)
+		}
+	}
+}
+
+func TestAttachConnectionCanApprove(t *testing.T) {
+	path, _ := newTestServer(t, RoleAttach)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	resp, err := c.Call(v1.Request{Version: v1.Version, RequestID: "r1", Operation: v1.OpCommandApprove})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("attach connection must be able to approve, got %+v", resp.Error)
+	}
+}
+
+func TestReusedRequestIDsAreIndependentlyAnswered(t *testing.T) {
+	path, _ := newTestServer(t, RoleAttach)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	for i := 0; i < 3; i++ {
+		resp, err := c.Call(v1.Request{Version: v1.Version, RequestID: "same-id", Operation: v1.OpPortsList})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error != nil {
+			t.Fatalf("%+v", resp.Error)
+		}
+	}
+}
+
+func TestServerCloseStopsAcceptingConnections(t *testing.T) {
+	path, s := newTestServer(t, RoleAttach)
+	s.Close()
+	time.Sleep(20 * time.Millisecond)
+	if _, err := Dial(path); err == nil {
+		t.Fatal("expected dialing a closed server's socket to fail")
+	}
+}

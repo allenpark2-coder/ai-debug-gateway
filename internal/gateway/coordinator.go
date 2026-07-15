@@ -254,6 +254,36 @@ func (c *Coordinator) ConfirmSessionReady() error {
 	return c.sess.Apply(session.Authenticated)
 }
 
+// Result returns the recorded result for transactionID, if any.
+func (c *Coordinator) Result(transactionID string) (*command.Result, error) {
+	return c.commands.Result(transactionID)
+}
+
+// Reject marks a pending proposal as rejected.
+func (c *Coordinator) Reject(proposalID string) error {
+	return c.commands.Reject(proposalID)
+}
+
+// PendingForSession returns every currently pending proposal for
+// sessionID.
+func (c *Coordinator) PendingForSession(sessionID string) []*command.Proposal {
+	return c.commands.PendingForSession(sessionID)
+}
+
+// Disconnect closes the active transport, if any, without stopping the
+// coordinator itself. The reader goroutine's own error handling then
+// moves the session to RECONNECTING exactly as a real transport loss
+// would, so a later StartUART/RetryUART can begin a fresh session.
+func (c *Coordinator) Disconnect() error {
+	c.mu.Lock()
+	stream := c.stream
+	c.mu.Unlock()
+	if stream == nil {
+		return ErrNotConnected
+	}
+	return stream.Close()
+}
+
 // WriteHuman forwards raw human keystrokes straight to the transport.
 // It never touches the subscriber fan-out, so a stalled AI subscriber
 // can never delay it.

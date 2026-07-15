@@ -1,0 +1,348 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/transcript"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/gateway"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/profile"
+	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport/serial"
+)
+
+// defaultRetentionLimit bounds how many durable records records.export
+// returns per store. Full disk-level pruning of older records is
+// future hardening work; this bounds what one export call returns.
+const defaultRetentionLimit = 5000
+
+// dispatcher wires the v1 protocol to one board's Coordinator, plus
+// the durable audit/transcript stores and the open-transaction set
+// used to recover from a crash.
+type dispatcher struct {
+	board      string
+	profileDir string
+	loginCfg   gateway.LoginConfig
+	coord      *gateway.Coordinator
+	open       *openSet
+	aw         *audit.Writer
+	tw         *transcript.Writer
+
+	retentionLimit int
+
+	// listPorts/openPort are overridden in tests to avoid touching real
+	// hardware; production code leaves them nil and falls back to the
+	// real serial package.
+	listPorts func() ([]serial.Port, error)
+	openPort  func(serial.Port, serial.LineSettings) (transport.Stream, error)
+}
+
+func newDispatcher(board, profileDir string, coord *gateway.Coordinator, open *openSet, aw *audit.Writer, tw *transcript.Writer, loginCfg gateway.LoginConfig) *dispatcher {
+	return &dispatcher{
+		board:          board,
+		profileDir:     profileDir,
+		loginCfg:       loginCfg,
+		coord:          coord,
+		open:           open,
+		aw:             aw,
+		tw:             tw,
+		retentionLimit: defaultRetentionLimit,
+	}
+}
+
+func (d *dispatcher) doListPorts() ([]serial.Port, error) {
+	if d.listPorts != nil {
+		return d.listPorts()
+	}
+	return serial.List()
+}
+
+func (d *dispatcher) doOpenPort(p serial.Port, line serial.LineSettings) (transport.Stream, error) {
+	if d.openPort != nil {
+		return d.openPort(p, line)
+	}
+	return serial.Open(p, line)
+}
+
+func badPayload(err error) *v1.ProtocolError {
+	return &v1.ProtocolError{Code: v1.ErrCodeInvalidPayload, Message: err.Error()}
+}
+
+func internalErr(err error) *v1.ProtocolError {
+	return &v1.ProtocolError{Code: v1.ErrCodeInternal, Message: err.Error()}
+}
+
+// Dispatch implements ipc.Dispatcher. The server has already checked
+// the protocol version and the role's operation allowlist before
+// calling this.
+func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolError) {
+	switch req.Operation {
+	case v1.OpPortsList:
+		return d.portsList()
+	case v1.OpSessionStart:
+		return d.sessionStart(req.Payload)
+	case v1.OpSessionStatus:
+		return d.sessionStatus()
+	case v1.OpSessionEnd:
+		return d.sessionEnd()
+	case v1.OpOutputRead:
+		return d.outputRead(req.Payload)
+	case v1.OpCommandPropose:
+		return d.commandPropose(req.Payload)
+	case v1.OpCommandList:
+		return d.commandList(req.Payload)
+	case v1.OpRecordsExport:
+		return d.recordsExport(req.Payload)
+	case v1.OpCommandApprove:
+		return d.commandApprove(req.Payload)
+	case v1.OpCommandReject:
+		return d.commandReject(req.Payload)
+	case v1.OpTransportWrite:
+		return d.transportWrite(req.Payload)
+	case v1.OpRetryUART:
+		return d.retryUART()
+	default:
+		return nil, &v1.ProtocolError{Code: v1.ErrCodeUnknownOperation, Message: req.Operation}
+	}
+}
+
+func (d *dispatcher) portsList() (any, *v1.ProtocolError) {
+	ports, err := d.doListPorts()
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]any{"ports": ports}, nil
+}
+
+type sessionStartPayload struct {
+	Board string `json:"board"`
+}
+
+func (d *dispatcher) sessionStart(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p sessionStartPayload
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, badPayload(err)
+		}
+	}
+	if p.Board == "" {
+		p.Board = d.board
+	}
+
+	prof, err := profile.Load(d.profileDir, p.Board)
+	if err != nil {
+		return nil, badPayload(fmt.Errorf("loading profile %q: %w", p.Board, err))
+	}
+	if prof.UART == nil {
+		return nil, badPayload(fmt.Errorf("profile %q has no UART configuration", p.Board))
+	}
+
+	opener := func() (transport.Stream, error) {
+		ports, err := d.doListPorts()
+		if err != nil {
+			return nil, err
+		}
+		m := serial.Match(prof.UART.Identity, ports)
+		if m.NeedsHumanSelection || m.Port == nil {
+			return nil, gateway.ErrHumanSelectionRequired
+		}
+		return d.doOpenPort(*m.Port, prof.UART.Line)
+	}
+
+	stream, err := opener()
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	if err := d.coord.StartUART(stream, d.loginCfg, opener); err != nil {
+		stream.Close()
+		return nil, internalErr(err)
+	}
+
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) sessionStatus() (any, *v1.ProtocolError) {
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) sessionEnd() (any, *v1.ProtocolError) {
+	if err := d.coord.Disconnect(); err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]string{"state": string(d.coord.State())}, nil
+}
+
+type outputReadPayload struct {
+	After uint64 `json:"after"`
+	Max   int    `json:"max"`
+}
+
+func (d *dispatcher) outputRead(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p outputReadPayload
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, badPayload(err)
+		}
+	}
+	if p.Max <= 0 {
+		p.Max = 64 * 1024
+	}
+	chunk := d.coord.ReadAfter(p.After, p.Max)
+	return map[string]any{
+		"start": chunk.Start,
+		"next":  chunk.Next,
+		"data":  chunk.Data,
+		"gap":   chunk.Gap,
+	}, nil
+}
+
+type commandProposePayload struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text"`
+	Purpose   string `json:"purpose"`
+	TimeoutMS int64  `json:"timeout_ms"`
+}
+
+func (d *dispatcher) commandPropose(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p commandProposePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	timeout := time.Duration(p.TimeoutMS) * time.Millisecond
+	prop, err := d.coord.Propose(p.SessionID, p.Text, p.Purpose, timeout)
+	if err != nil {
+		return nil, badPayload(err)
+	}
+	return prop, nil
+}
+
+type commandListPayload struct {
+	SessionID string `json:"session_id"`
+}
+
+func (d *dispatcher) commandList(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p commandListPayload
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, badPayload(err)
+		}
+	}
+	if p.SessionID == "" {
+		p.SessionID = d.coord.SessionID()
+	}
+	return map[string]any{"pending": d.coord.PendingForSession(p.SessionID)}, nil
+}
+
+type commandIDPayload struct {
+	ProposalID string `json:"proposal_id"`
+}
+
+func (d *dispatcher) commandApprove(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p commandIDPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	tx, err := d.coord.Approve(p.ProposalID)
+	if err != nil {
+		return nil, badPayload(err)
+	}
+	if d.aw != nil {
+		_, _ = d.aw.Append(audit.Record{Kind: "transaction", Detail: tx.ID})
+	}
+	if d.open != nil {
+		_ = d.open.add(tx.ID)
+	}
+	return tx, nil
+}
+
+func (d *dispatcher) commandReject(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p commandIDPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	if err := d.coord.Reject(p.ProposalID); err != nil {
+		return nil, badPayload(err)
+	}
+	return map[string]string{"proposal_id": p.ProposalID, "state": "rejected"}, nil
+}
+
+type transportWritePayload struct {
+	Data []byte `json:"data"`
+}
+
+func (d *dispatcher) transportWrite(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p transportWritePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	n, err := d.coord.WriteHuman(p.Data)
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]int{"written": n}, nil
+}
+
+func (d *dispatcher) retryUART() (any, *v1.ProtocolError) {
+	if err := d.coord.RetryUART(); err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+type recordsExportPayload struct {
+	AfterTranscript uint64 `json:"after_transcript"`
+	AfterAudit      uint64 `json:"after_audit"`
+}
+
+func (d *dispatcher) recordsExport(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p recordsExportPayload
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, badPayload(err)
+		}
+	}
+
+	transcriptRecords, err := d.tw.ReadAll()
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	transcriptRecords = applyRetention(transcriptRecords, d.retentionLimit)
+
+	auditRecords, err := d.aw.ReadAll()
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	auditRecords = applyRetention(auditRecords, d.retentionLimit)
+
+	var filteredTranscript []transcript.Record
+	for _, r := range transcriptRecords {
+		if r.Seq > p.AfterTranscript {
+			filteredTranscript = append(filteredTranscript, r)
+		}
+	}
+	var filteredAudit []audit.Record
+	for _, r := range auditRecords {
+		if r.Seq > p.AfterAudit {
+			filteredAudit = append(filteredAudit, r)
+		}
+	}
+
+	return map[string]any{
+		"transcript": filteredTranscript,
+		"audit":      filteredAudit,
+	}, nil
+}
+
+// applyRetention keeps only the most recent limit records, so
+// records.export never returns an unbounded amount of durable history
+// in one call.
+func applyRetention[T any](records []T, limit int) []T {
+	if limit <= 0 || len(records) <= limit {
+		return records
+	}
+	return records[len(records)-limit:]
+}
