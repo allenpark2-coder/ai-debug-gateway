@@ -66,3 +66,25 @@ GREEN evidence:
   is required when enabled (including an empty JSON extension), recommends
   rather than claims enforcement of directory ownership, and refers to all
   enabled sockets.
+
+## Final seam hardening
+
+- Removed the production-active serial discovery override. Normal Linux builds
+  compile `byid_production_linux.go`: the root is the constant trusted
+  `/dev/serial/by-id`, environment cannot redirect it, and by-id entries cannot
+  introduce devices omitted by upstream serial enumeration. The default race
+  test proves both properties.
+- Only `-tags integrationtest` compiles the private by-id root and PTY
+  enumeration seam. The UART end-to-end test builds its real `gatewayd` binary
+  with that explicit tag; ordinary binaries and the Windows cross-build do not
+  contain the seam.
+- Replaced the fixed secret-path sleep with bounded polling of the target's
+  received command list and an explicit timeout failure.
+- Fresh focused evidence:
+  `GOCACHE=/tmp/ai-debug-gateway-go-cache go test -race -tags integrationtest
+  ./internal/integration -run Diagnose -v -count=1` passed all four tests in
+  8.184s. Both default and tagged serial-package race tests also passed.
+- Final-head release evidence: `GOCACHE=/tmp/ai-debug-gateway-go-cache make
+  verify` passed build, empty gofmt check, vet, every race-enabled package
+  (integration 19.190s; serial 1.029s), Windows core/transport cross-build, and
+  final gateway/gatewayd builds.

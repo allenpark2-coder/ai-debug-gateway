@@ -17,10 +17,19 @@ import (
 // and returns the executable path, so this exercises the real
 // compiled binary rather than calling Go code directly in-process.
 func buildBinary(t *testing.T, name string) string {
+	return buildBinaryWithTags(t, name, "")
+}
+
+func buildBinaryWithTags(t *testing.T, name, tags string) string {
 	t.Helper()
 	dir := t.TempDir()
 	out := filepath.Join(dir, name)
-	cmd := exec.Command("go", "build", "-o", out, "./cmd/"+name)
+	args := []string{"build"}
+	if tags != "" {
+		args = append(args, "-tags", tags)
+	}
+	args = append(args, "-o", out, "./cmd/"+name)
+	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot(t)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building %s: %v\n%s", name, err, output)

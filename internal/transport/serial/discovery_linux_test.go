@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && integrationtest
 
 package serial
 
@@ -22,7 +22,7 @@ func TestListUsesConfiguredByIDDirectory(t *testing.T) {
 	if err := os.Symlink(device, identity); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GATEWAYD_SERIAL_BY_ID_DIR", byID)
+	t.Setenv("GATEWAYD_INTEGRATION_SERIAL_BY_ID_DIR", byID)
 	ports, err := List()
 	if err != nil {
 		t.Fatal(err)
