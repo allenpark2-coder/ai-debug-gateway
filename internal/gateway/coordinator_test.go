@@ -2,11 +2,70 @@ package gateway
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/command"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
 )
+
+func TestWaitResultImmediateAndMarkerWakeup(t *testing.T) {
+	c := newTestCoordinator(t)
+	stream := newFakeStream(transport.Identity{Kind: "usb-serial-by-id", Key: "x"})
+	if err := c.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.Propose(c.SessionID(), "uname -a", "kernel", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := c.Approve(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *command.Result, 1)
+	go func() { r, _ := c.WaitResult(context.Background(), tx.ID); done <- r }()
+	stream.feed([]byte(tx.ID)) // unrelated output must not wake the waiter
+	select {
+	case <-done:
+		t.Fatal("waiter woke before completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+	m := c.activeMarker()
+	stream.feed([]byte("GWMARK:" + tx.ID + ":" + m.nonce + ":0\n"))
+	var got *command.Result
+	select {
+	case got = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("waiter was not awakened")
+	}
+	if got.Status != command.StatusCompleted {
+		t.Fatalf("status = %s", got.Status)
+	}
+	immediate, err := c.WaitResult(context.Background(), tx.ID)
+	if err != nil || immediate.TransactionID != tx.ID {
+		t.Fatalf("immediate = %+v, %v", immediate, err)
+	}
+}
+
+func TestWaitResultCancellationRemovesWaiter(t *testing.T) {
+	c := newTestCoordinator(t)
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := c.WaitResult(ctx, "missing"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	c.mu.Lock()
+	n := len(c.resultWaiters)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("leaked %d waiter entries", n)
+	}
+}
 
 func newTestCoordinator(t *testing.T) *Coordinator {
 	t.Helper()

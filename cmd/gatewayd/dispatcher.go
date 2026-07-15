@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/command"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/session"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/transcript"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/gateway"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/policy"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/profile"
 	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
@@ -27,13 +30,15 @@ const defaultRetentionLimit = 5000
 // the durable audit/transcript stores and the open-transaction set
 // used to recover from a crash.
 type dispatcher struct {
-	board      string
-	profileDir string
-	loginCfg   gateway.LoginConfig
-	coord      *gateway.Coordinator
-	open       *openSet
-	aw         *audit.Writer
-	tw         *transcript.Writer
+	board        string
+	profileDir   string
+	loginCfg     gateway.LoginConfig
+	coord        *gateway.Coordinator
+	open         *openSet
+	aw           *audit.Writer
+	tw           *transcript.Writer
+	policy       *policy.Policy
+	diagnosticMu sync.Mutex
 
 	retentionLimit int
 
@@ -110,6 +115,8 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 		return d.sessionEnd()
 	case v1.OpOutputRead:
 		return d.outputRead(req.Payload)
+	case v1.OpDiagnoseExecute:
+		return d.diagnoseExecute(req.Payload)
 	case v1.OpCommandPropose:
 		return d.commandPropose(req.Payload)
 	case v1.OpCommandList:
@@ -306,6 +313,91 @@ type commandProposePayload struct {
 	TimeoutMS int64  `json:"timeout_ms"`
 }
 
+const diagnosticOutputLimit = 64 * 1024
+
+type diagnoseExecutePayload struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text"`
+	Purpose   string `json:"purpose"`
+	TimeoutMS int64  `json:"timeout_ms"`
+}
+
+type diagnoseExecuteResult struct {
+	Decision       policy.Decision      `json:"decision"`
+	Transaction    *command.Transaction `json:"transaction,omitempty"`
+	Result         *command.Result      `json:"result,omitempty"`
+	TruncatedStart bool                 `json:"truncated_start"`
+	TruncatedEnd   bool                 `json:"truncated_end"`
+}
+
+func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p diagnoseExecutePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	if d.policy == nil {
+		return nil, internalErr(fmt.Errorf("diagnostic policy is disabled"))
+	}
+	if !d.diagnosticMu.TryLock() {
+		return nil, badPayload(fmt.Errorf("diagnostic execution is busy"))
+	}
+	defer d.diagnosticMu.Unlock()
+	decision := d.policy.Evaluate(p.Text)
+	out := diagnoseExecuteResult{Decision: decision}
+	if !decision.Allowed {
+		return out, nil
+	}
+	if p.SessionID == "" {
+		p.SessionID = d.coord.SessionID()
+	}
+	if p.SessionID != d.coord.SessionID() {
+		return nil, badPayload(fmt.Errorf("session is not current"))
+	}
+	if !d.coord.AIEnabled() || d.coord.State() != session.Ready {
+		return nil, badPayload(gateway.ErrNotReady)
+	}
+	prop, err := d.coord.Propose(p.SessionID, p.Text, p.Purpose, time.Duration(p.TimeoutMS)*time.Millisecond)
+	if err != nil {
+		return nil, badPayload(err)
+	}
+	d.audit("proposal", prop.ID)
+	d.audit("auto-readonly-approval", prop.ID)
+	tx, err := d.coord.Approve(prop.ID)
+	if err != nil {
+		return nil, badPayload(err)
+	}
+	out.Transaction = tx
+	d.audit("transaction", tx.ID)
+	if d.open != nil {
+		_ = d.open.add(tx.ID)
+	}
+	res, err := d.coord.WaitResult(context.Background(), tx.ID)
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	if d.open != nil {
+		_ = d.open.remove(tx.ID)
+	}
+	d.audit("result", fmt.Sprintf("transaction=%s status=%s", tx.ID, res.Status))
+	copyResult := *res
+	copyResult.Output = append([]byte(nil), res.Output...)
+	if len(copyResult.Output) >= 1<<20 {
+		out.TruncatedStart = true
+	}
+	if len(copyResult.Output) > diagnosticOutputLimit {
+		copyResult.Output = copyResult.Output[:diagnosticOutputLimit]
+		out.TruncatedEnd = true
+	}
+	out.Result = &copyResult
+	return out, nil
+}
+
+func (d *dispatcher) audit(kind, detail string) {
+	if d.aw != nil {
+		_, _ = d.aw.Append(audit.Record{Board: d.board, Session: d.coord.SessionID(), Kind: kind, Detail: detail})
+	}
+}
+
 func (d *dispatcher) commandPropose(payload json.RawMessage) (any, *v1.ProtocolError) {
 	var p commandProposePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -359,6 +451,8 @@ func (d *dispatcher) commandApprove(payload json.RawMessage) (any, *v1.ProtocolE
 }
 
 func (d *dispatcher) commandReject(payload json.RawMessage) (any, *v1.ProtocolError) {
+	d.diagnosticMu.Lock()
+	defer d.diagnosticMu.Unlock()
 	var p commandIDPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, badPayload(err)
@@ -376,6 +470,8 @@ type commandEditPayload struct {
 }
 
 func (d *dispatcher) commandEdit(payload json.RawMessage) (any, *v1.ProtocolError) {
+	d.diagnosticMu.Lock()
+	defer d.diagnosticMu.Unlock()
 	var p commandEditPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, badPayload(err)
