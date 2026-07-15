@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/session"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/transcript"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/gateway"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
@@ -105,6 +106,12 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 		return d.transportWrite(req.Payload)
 	case v1.OpRetryUART:
 		return d.retryUART()
+	case v1.OpTakeover:
+		return d.takeover()
+	case v1.OpSecretBegin:
+		return d.secretBegin()
+	case v1.OpSecretDone:
+		return d.secretDone()
 	default:
 		return nil, &v1.ProtocolError{Code: v1.ErrCodeUnknownOperation, Message: req.Operation}
 	}
@@ -274,16 +281,49 @@ type transportWritePayload struct {
 	Data []byte `json:"data"`
 }
 
+// ctrlC is the single byte the human's Ctrl-C keystroke sends.
+const ctrlC = 0x03
+
 func (d *dispatcher) transportWrite(payload json.RawMessage) (any, *v1.ProtocolError) {
 	var p transportWritePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, badPayload(err)
 	}
+
+	// While an approved AI transaction is executing, normal human text
+	// input is paused to preserve output attribution; the human
+	// retains Ctrl-C and (via a separate takeover operation) forced
+	// takeover.
+	isCtrlC := len(p.Data) == 1 && p.Data[0] == ctrlC
+	if d.coord.State() == session.RunningCommand && !isCtrlC {
+		return nil, &v1.ProtocolError{
+			Code:    v1.ErrCodePermissionDenied,
+			Message: "human input is paused while an approved transaction is executing; use takeover to regain control",
+		}
+	}
+
 	n, err := d.coord.WriteHuman(p.Data)
 	if err != nil {
 		return nil, internalErr(err)
 	}
 	return map[string]int{"written": n}, nil
+}
+
+func (d *dispatcher) takeover() (any, *v1.ProtocolError) {
+	if err := d.coord.Takeover(); err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]string{"state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) secretBegin() (any, *v1.ProtocolError) {
+	d.coord.BeginSecret()
+	return map[string]string{"state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) secretDone() (any, *v1.ProtocolError) {
+	d.coord.EndSecret()
+	return map[string]string{"state": string(d.coord.State())}, nil
 }
 
 func (d *dispatcher) retryUART() (any, *v1.ProtocolError) {

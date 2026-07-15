@@ -261,3 +261,109 @@ func TestRecordsExportEnforcesRetentionLimit(t *testing.T) {
 		t.Fatalf("got %+v, want 3 records after retention", out["transcript"])
 	}
 }
+
+func startTestSession(t *testing.T, d *dispatcher, stream *fakeCoordStream) {
+	t.Helper()
+	d.listPorts = func() ([]serial.Port, error) {
+		return []serial.Port{{Path: "/dev/ttyUSB0", ByIDPath: "/dev/serial/by-id/usb-x"}}, nil
+	}
+	d.openPort = func(serial.Port, serial.LineSettings) (transport.Stream, error) { return stream, nil }
+	saveTestProfile(t, d)
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{
+		Operation: v1.OpSessionStart,
+		Payload:   mustJSON(t, sessionStartPayload{Board: "board-1"}),
+	}); protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	stream.feedData([]byte("board $ "))
+	waitForCond(t, time.Second, func() bool { return d.coord.AIEnabled() })
+}
+
+func TestTransportWritePausedDuringRunningCommandExceptCtrlC(t *testing.T) {
+	d := newTestDispatcher(t)
+	stream := newFakeCoordStream()
+	startTestSession(t, d, stream)
+
+	proposeResult, protoErr := d.Dispatch(ipc.RoleControl, v1.Request{
+		Operation: v1.OpCommandPropose,
+		Payload:   mustJSON(t, commandProposePayload{SessionID: d.coord.SessionID(), Text: "sleep 5", Purpose: "long", TimeoutMS: 5000}),
+	})
+	if protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	prop := proposeResult.(*command.Proposal)
+
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{
+		Operation: v1.OpCommandApprove,
+		Payload:   mustJSON(t, commandIDPayload{ProposalID: prop.ID}),
+	}); protoErr != nil {
+		t.Fatal(protoErr)
+	}
+
+	_, protoErr = d.Dispatch(ipc.RoleAttach, v1.Request{
+		Operation: v1.OpTransportWrite,
+		Payload:   mustJSON(t, transportWritePayload{Data: []byte("ordinary keystrokes\n")}),
+	})
+	if protoErr == nil || protoErr.Code != v1.ErrCodePermissionDenied {
+		t.Fatalf("got %+v, want permission_denied while a transaction runs", protoErr)
+	}
+
+	_, protoErr = d.Dispatch(ipc.RoleAttach, v1.Request{
+		Operation: v1.OpTransportWrite,
+		Payload:   mustJSON(t, transportWritePayload{Data: []byte{0x03}}),
+	})
+	if protoErr != nil {
+		t.Fatalf("Ctrl-C must still be forwarded while a transaction runs, got %+v", protoErr)
+	}
+}
+
+func TestTakeoverEndsTransactionAndReenablesInput(t *testing.T) {
+	d := newTestDispatcher(t)
+	stream := newFakeCoordStream()
+	startTestSession(t, d, stream)
+
+	proposeResult, protoErr := d.Dispatch(ipc.RoleControl, v1.Request{
+		Operation: v1.OpCommandPropose,
+		Payload:   mustJSON(t, commandProposePayload{SessionID: d.coord.SessionID(), Text: "sleep 5", Purpose: "long", TimeoutMS: 5000}),
+	})
+	if protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	prop := proposeResult.(*command.Proposal)
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{
+		Operation: v1.OpCommandApprove,
+		Payload:   mustJSON(t, commandIDPayload{ProposalID: prop.ID}),
+	}); protoErr != nil {
+		t.Fatal(protoErr)
+	}
+
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{Operation: v1.OpTakeover}); protoErr != nil {
+		t.Fatal(protoErr)
+	}
+
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{
+		Operation: v1.OpTransportWrite,
+		Payload:   mustJSON(t, transportWritePayload{Data: []byte("back in control\n")}),
+	}); protoErr != nil {
+		t.Fatalf("input must be re-enabled after takeover, got %+v", protoErr)
+	}
+}
+
+func TestSecretBeginAndDoneOnlyAllowedOnAttach(t *testing.T) {
+	d := newTestDispatcher(t)
+	stream := newFakeCoordStream()
+	startTestSession(t, d, stream)
+
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{Operation: v1.OpSecretBegin}); protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	if !d.coord.SecretActive() {
+		t.Fatal("secret.begin must open the redaction window")
+	}
+	if _, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{Operation: v1.OpSecretDone}); protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	if d.coord.SecretActive() {
+		t.Fatal("secret.done must close the redaction window")
+	}
+}
