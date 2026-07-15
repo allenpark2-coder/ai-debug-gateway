@@ -1,13 +1,186 @@
 package main
 
 import (
+	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
 )
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+func (b *syncBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
+
+type fakeDaemonServer struct {
+	serve  chan error
+	closed chan struct{}
+}
+
+func newFakeDaemonServer() *fakeDaemonServer {
+	return &fakeDaemonServer{serve: make(chan error, 1), closed: make(chan struct{})}
+}
+func (s *fakeDaemonServer) Serve() error { return <-s.serve }
+func (s *fakeDaemonServer) Close() error {
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
+func TestServeDaemonSocketsAreOptInAndCloseTogether(t *testing.T) {
+	for _, auto := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordinary", true: "auto"}[auto], func(t *testing.T) {
+			var paths []string
+			var servers []*fakeDaemonServer
+			created := make(chan struct{}, 3)
+			listen := func(path string, _ ipc.Role, _ ipc.Dispatcher) (daemonServer, error) {
+				paths = append(paths, path)
+				s := newFakeDaemonServer()
+				servers = append(servers, s)
+				created <- struct{}{}
+				return s, nil
+			}
+			stop := make(chan os.Signal, 1)
+			var logs syncBuffer
+			done := make(chan error, 1)
+			go func() { done <- serveDaemonSockets(t.TempDir(), auto, nil, stop, listen, log.New(&logs, "", 0)) }()
+			want := 2
+			if auto {
+				want = 3
+			}
+			for i := 0; i < want; i++ {
+				<-created
+			}
+			if len(paths) != want {
+				t.Fatalf("paths = %v", paths)
+			}
+			joined := strings.Join(paths, " ")
+			if strings.Contains(joined, "diagnose") != auto {
+				t.Fatalf("paths = %v", paths)
+			}
+			for deadline := time.Now().Add(time.Second); logs.String() == "" && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
+			if strings.Contains(logs.String(), "diagnose=") != auto {
+				t.Fatalf("logs = %q", logs.String())
+			}
+			stop <- os.Interrupt
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range servers {
+				select {
+				case <-s.closed:
+				default:
+					t.Fatal("server not closed")
+				}
+			}
+		})
+	}
+}
+
+func TestServeDaemonSocketsClosesAllOnServerError(t *testing.T) {
+	var servers []*fakeDaemonServer
+	created := make(chan struct{}, 3)
+	listen := func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error) {
+		s := newFakeDaemonServer()
+		servers = append(servers, s)
+		created <- struct{}{}
+		return s, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(t.TempDir(), true, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+	}()
+	for i := 0; i < 3; i++ {
+		<-created
+	}
+	servers[1].serve <- errors.New("accept failed")
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "accept failed") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, s := range servers {
+		select {
+		case <-s.closed:
+		default:
+			t.Fatal("server not closed")
+		}
+	}
+}
+
+func TestDiagnoseSocketHasOwnerOnlyMode(t *testing.T) {
+	dir := t.TempDir()
+	stop := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(dir, true, nil, stop,
+			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
+				return ipc.Listen(path, role, dispatch)
+			},
+			log.New(io.Discard, "", 0))
+	}()
+	path := filepath.Join(dir, "gatewayd.diagnose.sock")
+	var info os.FileInfo
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		var err error
+		info, err = os.Stat(path)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if info == nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("socket info = %v", info)
+	}
+	stop <- os.Interrupt
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOrdinaryStartupRemovesStaleDiagnoseSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gatewayd.diagnose.sock")
+	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	listen := func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error) {
+		created <- struct{}{}
+		return newFakeDaemonServer(), nil
+	}
+	stop := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() { done <- serveDaemonSockets(dir, false, nil, stop, listen, log.New(io.Discard, "", 0)) }()
+	for i := 0; i < 2; i++ {
+		<-created
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stale diagnose socket remains: %v", err)
+	}
+	stop <- os.Interrupt
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestParseDaemonOptions(t *testing.T) {
 	got, err := parseDaemonOptions([]string{"--auto-readonly"})

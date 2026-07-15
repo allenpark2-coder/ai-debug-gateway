@@ -28,6 +28,12 @@ type daemonOptions struct {
 	AutoReadonly bool
 }
 
+type daemonServer interface {
+	Serve() error
+	Close() error
+}
+type daemonListenFunc func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error)
+
 func parseDaemonOptions(args []string) (daemonOptions, error) {
 	var options daemonOptions
 	flags := flag.NewFlagSet("gatewayd", flag.ContinueOnError)
@@ -171,37 +177,62 @@ func run() error {
 	go runOpenSetReconciler(coord, open, aw, reconcileStop)
 	defer close(reconcileStop)
 
-	controlSock := filepath.Join(d.Data, "gatewayd.control.sock")
-	attachSock := filepath.Join(d.Data, "gatewayd.attach.sock")
-
-	controlSrv, err := ipc.Listen(controlSock, ipc.RoleControl, disp)
-	if err != nil {
-		return err
-	}
-	defer controlSrv.Close()
-
-	attachSrv, err := ipc.Listen(attachSock, ipc.RoleAttach, disp)
-	if err != nil {
-		return err
-	}
-	defer attachSrv.Close()
-
-	go func() {
-		if err := controlSrv.Serve(); err != nil {
-			log.Printf("gatewayd: control listener stopped: %v", err)
-		}
-	}()
-	go func() {
-		if err := attachSrv.Serve(); err != nil {
-			log.Printf("gatewayd: attach listener stopped: %v", err)
-		}
-	}()
-
-	log.Printf("gatewayd: board=%q control=%s attach=%s", board, controlSock, attachSock)
-
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	<-sig
-	log.Print("gatewayd: shutting down")
-	return nil
+	defer signal.Stop(sig)
+	return serveDaemonSockets(d.Data, options.AutoReadonly, disp, sig,
+		func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
+			return ipc.Listen(path, role, dispatch)
+		}, log.Default())
+}
+
+func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) error {
+	diagnosePath := filepath.Join(dataDir, "gatewayd.diagnose.sock")
+	if !autoReadonly {
+		if err := os.Remove(diagnosePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove disabled diagnose socket: %w", err)
+		}
+	}
+	type listenerSpec struct {
+		name, path string
+		role       ipc.Role
+	}
+	specs := []listenerSpec{{"control", filepath.Join(dataDir, "gatewayd.control.sock"), ipc.RoleControl}, {"attach", filepath.Join(dataDir, "gatewayd.attach.sock"), ipc.RoleAttach}}
+	if autoReadonly {
+		specs = append(specs, listenerSpec{"diagnose", diagnosePath, ipc.RoleDiagnose})
+	}
+	servers := make([]daemonServer, 0, len(specs))
+	defer func() {
+		for _, srv := range servers {
+			_ = srv.Close()
+		}
+	}()
+	for _, spec := range specs {
+		srv, err := listen(spec.path, spec.role, disp)
+		if err != nil {
+			return fmt.Errorf("%s listener: %w", spec.name, err)
+		}
+		servers = append(servers, srv)
+	}
+	if autoReadonly {
+		logger.Printf("gatewayd: control=%s attach=%s diagnose=%s", specs[0].path, specs[1].path, specs[2].path)
+	} else {
+		logger.Printf("gatewayd: control=%s attach=%s", specs[0].path, specs[1].path)
+	}
+	errs := make(chan error, len(servers))
+	for i, srv := range servers {
+		name := specs[i].name
+		go func() {
+			if err := srv.Serve(); err != nil {
+				errs <- fmt.Errorf("%s listener stopped: %w", name, err)
+			}
+		}()
+	}
+	select {
+	case <-stop:
+		logger.Print("gatewayd: shutting down")
+		return nil
+	case err := <-errs:
+		return err
+	}
 }

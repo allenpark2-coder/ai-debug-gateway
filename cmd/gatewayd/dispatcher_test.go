@@ -353,7 +353,7 @@ func TestProposeApproveAndListRoundTrip(t *testing.T) {
 
 	approveResult, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{
 		Operation: v1.OpCommandApprove,
-		Payload:   mustJSON(t, commandIDPayload{ProposalID: prop.ID}),
+		Payload:   mustJSON(t, commandApprovePayload{ProposalID: prop.ID, Confirmation: "operator confirmed in chat"}),
 	})
 	if protoErr != nil {
 		t.Fatal(protoErr)
@@ -365,6 +365,11 @@ func TestProposeApproveAndListRoundTrip(t *testing.T) {
 
 	if got := d.open.list(); len(got) != 1 || got[0] != tx.ID {
 		t.Fatalf("expected the open set to track the new transaction, got %+v", got)
+	}
+	records, err := d.aw.ReadAll()
+	if err != nil { t.Fatal(err) }
+	if len(records) != 2 || records[0].Kind != "approval" || !strings.Contains(records[0].Detail, prop.ID) || !strings.Contains(records[0].Detail, "operator confirmed in chat") || records[1].Kind != "transaction" {
+		t.Fatalf("audit records = %+v", records)
 	}
 }
 

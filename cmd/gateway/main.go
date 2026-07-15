@@ -8,10 +8,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/term"
@@ -32,22 +34,32 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	profileDir := filepath.Join(dirs.Config, "profiles")
 	controlSock := filepath.Join(dirs.Data, "gatewayd.control.sock")
 	attachSock := filepath.Join(dirs.Data, "gatewayd.attach.sock")
+	diagnoseSock := filepath.Join(dirs.Data, "gatewayd.diagnose.sock")
+	if err := runCLI(os.Args[1:], socketPaths{Control: controlSock, Attach: attachSock, Diagnose: diagnoseSock, ProfileDir: filepath.Join(dirs.Config, "profiles")}, cli.Dial, os.Stdout, os.Stderr); err != nil {
+		fatal(err)
+	}
+}
 
-	args := os.Args[2:]
-	switch os.Args[1] {
+type socketPaths struct{ Control, Attach, Diagnose, ProfileDir string }
+type clientDialer func(string) (*cli.Client, error)
+
+func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stderr io.Writer) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("command is required")
+	}
+
+	args := argv[1:]
+	switch argv[0] {
 	case "ports":
-		runControl(controlSock, func(c *cli.Client) error { return printResult(c.PortsList()) })
+		return runClient(sockets.Control, dial, func(c *cli.Client) error { data, err := c.PortsList(); return printResultTo(stdout, data, err) })
 	case "profile":
 		if len(args) < 1 || args[0] != "create" {
 			usage()
 			os.Exit(2)
 		}
-		if err := profileCreate(profileDir); err != nil {
-			fatal(err)
-		}
+		return profileCreate(sockets.ProfileDir)
 	case "start":
 		board := flagValue(args, "--board")
 		opts := cli.SessionStartOptions{
@@ -62,28 +74,63 @@ func main() {
 		// acceptance for a brand new host only ever succeeds on an
 		// attach connection, and an operator typing this command is,
 		// by definition, at an interactive terminal.
-		runControl(attachSock, func(c *cli.Client) error { return printResult(c.SessionStartWithOptions(board, opts)) })
+		return runClient(sockets.Attach, dial, func(c *cli.Client) error {
+			data, err := c.SessionStartWithOptions(board, opts)
+			return printResultTo(stdout, data, err)
+		})
 	case "status":
-		runControl(controlSock, func(c *cli.Client) error { return printResult(c.SessionStatus()) })
+		return runClient(sockets.Control, dial, func(c *cli.Client) error { data, err := c.SessionStatus(); return printResultTo(stdout, data, err) })
 	case "output":
 		after := parseUint(flagValue(args, "--after"))
-		runControl(controlSock, func(c *cli.Client) error { return printResult(c.OutputRead(after, 64*1024)) })
+		return runClient(sockets.Control, dial, func(c *cli.Client) error {
+			data, err := c.OutputRead(after, 64*1024)
+			return printResultTo(stdout, data, err)
+		})
 	case "propose":
 		text := flagValue(args, "--text")
 		purpose := flagValue(args, "--purpose")
 		timeoutMS := parseInt(flagValue(args, "--timeout-ms"))
 		session := flagValue(args, "--session")
-		runControl(controlSock, func(c *cli.Client) error {
-			return printResult(c.CommandPropose(session, text, purpose, timeoutMS))
+		return runClient(sockets.Control, dial, func(c *cli.Client) error {
+			data, err := c.CommandPropose(session, text, purpose, timeoutMS)
+			return printResultTo(stdout, data, err)
+		})
+	case "diagnose":
+		req := cli.DiagnoseRequest{SessionID: flagValue(args, "--session"), Text: flagValue(args, "--text"), Purpose: flagValue(args, "--purpose"), TimeoutMS: parseInt(flagValue(args, "--timeout-ms"))}
+		if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.Text) == "" || strings.TrimSpace(req.Purpose) == "" || req.TimeoutMS <= 0 {
+			return fmt.Errorf("diagnose requires nonempty --session, --text, --purpose, and positive --timeout-ms")
+		}
+		fmt.Fprintln(stderr, req.Text)
+		return runClient(sockets.Diagnose, dial, func(c *cli.Client) error {
+			result, err := c.DiagnoseExecute(req)
+			if err != nil {
+				return err
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(stdout, string(data))
+			return err
+		})
+	case "approve":
+		proposal, confirmation := flagValue(args, "--proposal"), flagValue(args, "--confirmation")
+		if strings.TrimSpace(proposal) == "" || strings.TrimSpace(confirmation) == "" {
+			return fmt.Errorf("approve requires nonempty --proposal and --confirmation")
+		}
+		return runClient(sockets.Attach, dial, func(c *cli.Client) error {
+			data, err := c.CommandApproveWithConfirmation(proposal, confirmation)
+			return printResultTo(stdout, data, err)
 		})
 	case "export":
-		runControl(controlSock, func(c *cli.Client) error { return printResult(c.RecordsExport(0, 0)) })
+		return runClient(sockets.Control, dial, func(c *cli.Client) error { data, err := c.RecordsExport(0, 0); return printResultTo(stdout, data, err) })
 	case "attach":
-		runAttach(attachSock)
+		runAttach(sockets.Attach)
+		return nil
 	default:
-		usage()
-		os.Exit(2)
+		return fmt.Errorf("unknown command %q", argv[0])
 	}
+	return nil
 }
 
 func usage() {
@@ -97,6 +144,8 @@ commands:
   status                                   report session state
   output --after N                         read console output after sequence N
   propose --session ID --text TEXT --purpose P --timeout-ms MS
+  diagnose --session ID --text TEXT --purpose P --timeout-ms MS
+  approve --proposal ID --confirmation NOTE
   export                                   export transcript/audit records
   attach                                   attach the interactive terminal`)
 }
@@ -148,24 +197,21 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-func runControl(socketPath string, fn func(*cli.Client) error) {
-	c, err := cli.Dial(socketPath)
-	if err != nil {
-		fatal(err)
-	}
-	defer c.Close()
-	if err := fn(c); err != nil {
-		fatal(err)
-	}
-}
-
-func printResult(data json.RawMessage, err error) error {
+func runClient(socketPath string, dial clientDialer, fn func(*cli.Client) error) error {
+	c, err := dial(socketPath)
 	if err != nil {
 		return err
 	}
-	os.Stdout.Write(data)
-	fmt.Println()
-	return nil
+	defer c.Close()
+	return fn(c)
+}
+
+func printResultTo(w io.Writer, data json.RawMessage, err error) error {
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, string(data))
+	return err
 }
 
 func runAttach(socketPath string) {

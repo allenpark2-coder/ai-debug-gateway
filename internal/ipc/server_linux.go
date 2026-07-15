@@ -17,8 +17,8 @@ import (
 	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
 )
 
-// Role distinguishes an AI-facing control connection from a human
-// attach connection. It is fixed per listener: cmd/gatewayd runs one
+// Role distinguishes control, human attach, and restricted diagnostic
+// connections. It is fixed per listener: cmd/gatewayd runs one
 // listener per role on its own socket path, so the capability boundary
 // is enforced by which socket a client dialed, not by a self-declared
 // claim over a shared connection.
