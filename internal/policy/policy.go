@@ -131,8 +131,5 @@ func (p *Policy) evaluateArgv(argv []string) Decision {
 	if !ok {
 		return deny("command.unknown", fmt.Sprintf("executable %q is not allowlisted", argv[0]))
 	}
-	if len(argv) == 2 && (argv[1] == "--help" || argv[1] == "--version") {
-		return allow("command." + argv[0] + ".information")
-	}
 	return validate(argv)
 }

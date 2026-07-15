@@ -45,6 +45,23 @@ func TestLoadFileAddsExactRulesWithoutOverridingDenials(t *testing.T) {
 	}
 }
 
+func TestLoadFileExactRulesCannotBeBypassedByInformationalOptions(t *testing.T) {
+	name := writePolicyFile(t, 0o600, `{
+		"allow":[{"executable":"opsis-inspect","args":[]}],
+		"deny":[{"executable":"blocked-inspect","args":["--help"]}]
+	}`)
+	p, err := LoadFile(name, Common())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision := p.Evaluate("opsis-inspect --help"); decision.Allowed {
+		t.Fatalf("file-added executable bypassed exact argv matching: %+v", decision)
+	}
+	if decision := p.Evaluate("blocked-inspect --help"); decision.Allowed {
+		t.Fatalf("explicit denial was bypassed by informational option: %+v", decision)
+	}
+}
+
 func TestLoadFileRejectsInvalidPolicies(t *testing.T) {
 	tests := []struct {
 		name string
@@ -54,10 +71,15 @@ func TestLoadFileRejectsInvalidPolicies(t *testing.T) {
 	}{
 		{"group readable", 0o640, `{}`, "permissions"},
 		{"world readable", 0o604, `{}`, "permissions"},
+		{"read only", 0o400, `{}`, "permissions"},
+		{"write only", 0o200, `{}`, "permissions"},
+		{"no permissions", 0o000, `{}`, "permissions"},
 		{"malformed JSON", 0o600, `{`, "JSON"},
 		{"unknown field", 0o600, `{"extra":[]}`, "unknown field"},
 		{"wildcard executable", 0o600, `{"allow":[{"executable":"opsis-*","args":["status"]}]}`, "executable"},
 		{"empty argv", 0o600, `{"allow":[{"executable":"","args":[]}]}`, "executable"},
+		{"omitted args", 0o600, `{"allow":[{"executable":"opsis-inspect"}]}`, "args"},
+		{"null args", 0o600, `{"allow":[{"executable":"opsis-inspect","args":null}]}`, "args"},
 		{"contradictory duplicate", 0o600, `{"allow":[{"executable":"opsis-inspect","args":["status"]}],"deny":[{"executable":"opsis-inspect","args":["status"]}]}`, "contradict"},
 		{"common forbidden executable", 0o600, `{"allow":[{"executable":"sh","args":["-c","id"]}]}`, "forbidden"},
 		{"mutator", 0o600, `{"allow":[{"executable":"rm","args":["--version"]}]}`, "forbidden"},

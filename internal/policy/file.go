@@ -22,6 +22,16 @@ type File struct {
 	Deny  []ArgvRule `json:"deny"`
 }
 
+type argvRuleWire struct {
+	Executable string    `json:"executable"`
+	Args       *[]string `json:"args"`
+}
+
+type fileWire struct {
+	Allow []argvRuleWire `json:"allow"`
+	Deny  []argvRuleWire `json:"deny"`
+}
+
 // LoadFile reads an owner-only board policy and returns a copy of base with
 // its exact deny and allow rules applied. The supplied base is never mutated.
 func LoadFile(path string, base *Policy) (*Policy, error) {
@@ -35,8 +45,8 @@ func LoadFile(path string, base *Policy) (*Policy, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("policy file: must be a regular file")
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("policy file: insecure permissions %04o; group and world access are forbidden", info.Mode().Perm())
+	if info.Mode().Perm() != 0o600 {
+		return nil, fmt.Errorf("policy file: permissions must be exactly 0600, got %04o", info.Mode().Perm())
 	}
 
 	f, err := os.Open(path)
@@ -44,13 +54,17 @@ func LoadFile(path string, base *Policy) (*Policy, error) {
 		return nil, fmt.Errorf("policy file: open: %w", err)
 	}
 	defer f.Close()
-	var rules File
+	var wire fileWire
 	decoder := json.NewDecoder(f)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&rules); err != nil {
+	if err := decoder.Decode(&wire); err != nil {
 		return nil, fmt.Errorf("policy file: invalid JSON: %w", err)
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	rules, err := materializeRules(wire)
+	if err != nil {
 		return nil, err
 	}
 
@@ -86,6 +100,28 @@ func LoadFile(path string, base *Policy) (*Policy, error) {
 		}
 	}
 	return result, nil
+}
+
+func materializeRules(wire fileWire) (File, error) {
+	convert := func(entries []argvRuleWire) ([]ArgvRule, error) {
+		result := make([]ArgvRule, 0, len(entries))
+		for _, entry := range entries {
+			if entry.Args == nil {
+				return nil, fmt.Errorf("policy file: args must be an explicit JSON array")
+			}
+			result = append(result, ArgvRule{Executable: entry.Executable, Args: *entry.Args})
+		}
+		return result, nil
+	}
+	allow, err := convert(wire.Allow)
+	if err != nil {
+		return File{}, err
+	}
+	deny, err := convert(wire.Deny)
+	if err != nil {
+		return File{}, err
+	}
+	return File{Allow: allow, Deny: deny}, nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
