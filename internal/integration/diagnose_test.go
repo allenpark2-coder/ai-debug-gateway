@@ -126,16 +126,17 @@ func newDiagnoseHarness(t *testing.T, automatic bool) *diagnoseHarness {
 	if err := attach.TransportWrite([]byte(h.canary + "\n")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for _, targetLine := range h.srv.Commands() {
+			if targetLine == h.canary {
+				goto canaryObserved
+			}
+		}
+	}
+	t.Fatal("secret canary did not traverse the target echo path before deadline")
+canaryObserved:
 	if err := attach.SecretDone(); err != nil {
 		t.Fatal(err)
-	}
-	seenCanaryAtTarget := false
-	for _, targetLine := range h.srv.Commands() {
-		seenCanaryAtTarget = seenCanaryAtTarget || targetLine == h.canary
-	}
-	if !seenCanaryAtTarget {
-		t.Fatal("secret canary did not traverse the target echo path")
 	}
 	return h
 }
@@ -334,8 +335,8 @@ func TestDiagnoseRealUARTBinariesReportTargetRebooted(t *testing.T) {
 	}
 
 	var daemonLog lockedBuffer
-	daemon := exec.Command(buildBinary(t, "gatewayd"), "--auto-readonly")
-	daemon.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME=", "XDG_DATA_HOME=", "GATEWAYD_BOARD=board-1", "GATEWAYD_SERIAL_BY_ID_DIR="+byIDDir)
+	daemon := exec.Command(buildBinaryWithTags(t, "gatewayd", "integrationtest"), "--auto-readonly")
+	daemon.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME=", "XDG_DATA_HOME=", "GATEWAYD_BOARD=board-1", "GATEWAYD_INTEGRATION_SERIAL_BY_ID_DIR="+byIDDir)
 	daemon.Stdout, daemon.Stderr = &daemonLog, &daemonLog
 	if err := daemon.Start(); err != nil {
 		t.Fatal(err)

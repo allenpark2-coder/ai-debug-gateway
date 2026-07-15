@@ -10,15 +10,6 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
 )
 
-const byIDDir = "/dev/serial/by-id"
-
-func resolvedByIDDir() string {
-	if dir := os.Getenv("GATEWAYD_SERIAL_BY_ID_DIR"); dir != "" {
-		return dir
-	}
-	return byIDDir
-}
-
 // List enumerates serial ports on the host, resolving each to its
 // stable "/dev/serial/by-id/..." identity when the kernel exposes one.
 func List() ([]Port, error) {
@@ -28,31 +19,21 @@ func List() ([]Port, error) {
 	}
 
 	byID := resolveByID()
-	seen := make(map[string]bool, len(names))
-
 	ports := make([]Port, 0, len(names))
 	for _, name := range names {
-		seen[name] = true
 		ports = append(ports, Port{
 			Path:     name,
 			ByIDPath: byID[name],
 		})
 	}
-	// A private by-id directory is useful in containers and integration tests
-	// where udev does not expose PTYs through the global device namespace.
-	for device, link := range byID {
-		if !seen[device] {
-			ports = append(ports, Port{Path: device, ByIDPath: link})
-		}
-	}
-	return ports, nil
+	return appendIntegrationPorts(ports, byID), nil
 }
 
 // resolveByID maps a resolved device node path (e.g. "/dev/ttyUSB0")
 // to its stable by-id symlink path, for every by-id entry the kernel
 // currently exposes.
 func resolveByID() map[string]string {
-	dir := resolvedByIDDir()
+	dir := serialByIDDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
