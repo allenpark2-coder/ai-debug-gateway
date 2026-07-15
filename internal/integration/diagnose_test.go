@@ -273,32 +273,11 @@ func TestDiagnoseRealBinaryReportsTimeoutAndDisconnect(t *testing.T) {
 	if timed.Result == nil || timed.Result.Status != command.StatusTimeout {
 		t.Fatalf("timeout result = %+v", timed.Result)
 	}
+	// SSH has no target prompt detector, so timeout deliberately disconnects
+	// the shell; another transaction cannot be attributed until reconnect.
 	time.Sleep(150 * time.Millisecond)
-
-	h.srv.SetManagedDelay(time.Second)
-	done := make(chan struct {
-		out string
-		err error
-	}, 1)
-	go func() {
-		out, _, err := h.runGateway(t, "diagnose", "--session", h.session, "--text", "ps", "--purpose", "disconnect check", "--timeout-ms", "5000")
-		done <- struct {
-			out string
-			err error
-		}{out, err}
-	}()
-	time.Sleep(100 * time.Millisecond)
-	h.srv.DisconnectAll()
-	result := <-done
-	if result.err != nil {
-		t.Fatal(result.err)
-	}
-	var disconnected cli.DiagnoseResult
-	if err := json.Unmarshal([]byte(result.out), &disconnected); err != nil {
-		t.Fatal(err)
-	}
-	if disconnected.Result == nil || disconnected.Result.Status != command.StatusDisconnected {
-		t.Fatalf("disconnect result = %+v", disconnected.Result)
+	if _, _, err := h.runGateway(t, "diagnose", "--session", h.session, "--text", "ps", "--purpose", "post-timeout check", "--timeout-ms", "5000"); err == nil {
+		t.Fatal("post-timeout diagnose unexpectedly reused an unresynchronized SSH shell")
 	}
 }
 

@@ -3,6 +3,7 @@ package ipc
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,5 +204,34 @@ func TestServerCloseStopsAcceptingConnections(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if _, err := Dial(path); err == nil {
 		t.Fatal("expected dialing a closed server's socket to fail")
+	}
+}
+
+func TestServerCloseTerminatesIdleAcceptedConnection(t *testing.T) {
+	path, s := newTestServer(t, RoleAttach)
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1024)
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Close() }()
+	select {
+	case err := <-done:
+		if err != nil && !strings.Contains(err.Error(), "closed") {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on idle accepted connection")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("client socket remained open")
 	}
 }

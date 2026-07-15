@@ -111,6 +111,35 @@ func TestDiagnoseStartRejectsStateWithoutPendingResidue(t *testing.T) {
 	}
 }
 
+func TestTimeoutInterruptsAndBlocksUntilPromptResynchronizes(t *testing.T) {
+	c := newTestCoordinator(t)
+	stream := newFakeStream(transport.Identity{Kind: "uart", Key: "x"})
+	if err := c.StartUART(stream, LoginConfig{ShellPromptPattern: mustCompile(`\$\s*$`)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	stream.feed([]byte("$ "))
+	waitFor(t, time.Second, func() bool { return c.State() == session.Ready })
+	tx, err := c.DiagnoseStart(c.SessionID(), "top -b", "processes", 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.WaitResult(context.Background(), tx.ID)
+	if err != nil || res.Status != command.StatusTimeout {
+		t.Fatalf("result=%+v err=%v", res, err)
+	}
+	if !bytes.Contains(stream.writtenSoFar(), []byte{3}) {
+		t.Fatal("timeout did not send Ctrl-C")
+	}
+	if _, err := c.DiagnoseStart(c.SessionID(), "uname", "kernel", time.Second); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("pre-resync err=%v", err)
+	}
+	stream.feed([]byte("^C\n$ "))
+	waitFor(t, time.Second, c.AIEnabled)
+	if _, err := c.DiagnoseStart(c.SessionID(), "uname", "kernel", time.Second); err != nil {
+		t.Fatalf("post-resync err=%v", err)
+	}
+}
+
 func TestExactRingCapacityIsNotStartTruncated(t *testing.T) {
 	c := newTestCoordinator(t)
 	stream := newFakeStream(transport.Identity{Kind: "ssh", Key: "x"})

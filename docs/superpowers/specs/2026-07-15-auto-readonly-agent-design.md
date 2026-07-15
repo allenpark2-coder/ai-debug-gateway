@@ -103,8 +103,10 @@ The policy is an argv- and syntax-aware allowlist, not substring matching. The
 first version accepts a deliberately small BusyBox/Linux diagnostic set,
 including read-only forms of:
 
-- `cat`, `head`, `tail`, `sed -n`, `tr`, `wc`, and `readlink` on readable
-  pseudo-files or normal paths;
+- `cat`, `head`, `tail`, `sed -n`, and `wc` only on exact kernel-defined
+  proc facts (`/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`,
+  `/proc/loadavg`, `/proc/version`, `/proc/filesystems`, `/proc/mounts`), plus
+  pipeline input where applicable; normal target paths are never content-read;
 - `ps`, batch `top`, `free`, `uptime`, `df`, `mount`, `findmnt`, `ls`, `stat`,
   `du`, and `find` without mutation actions;
 - `ip` show/list forms, `ss`, `netstat`, `route -n`, and read-only `ethtool`;
@@ -120,11 +122,11 @@ loops, conditionals, `eval`, interpreters, and arbitrary shell scripts in the
 first release. It also rejects ambiguous or unsupported syntax rather than
 trying to interpret it.
 
-Paths are checked after lexical normalization. Reads from `/proc`, `/sys`, and
-`/dev` are separately allowlisted because some apparently readable device or
-sysfs nodes have side effects. Sensitive paths such as private keys, password
-databases, gateway state, and secret-bearing process environments are denied
-even though reading them would not modify the target.
+Paths are checked after lexical normalization. The daemon cannot resolve
+target-side symlinks or hard links, so content-reading commands deny all normal
+filesystem paths, including `/etc/os-release`, `/etc/hostname`, and benign
+aliases. Board exact argv extensions remain explicit operator trust and may
+deliberately add a vendor reader; they do not weaken common command rules.
 
 Board policies add exact executable/subcommand rules on top of the common
 policy. An unknown `opsis-*`, Ambarella, vendor, or locally installed command
@@ -138,8 +140,12 @@ Policy rejection returns a structured decision with the rejected syntax or
 argv element and a safe explanation. It does not create or execute a
 transaction.
 
-Execution timeout uses the existing transaction timeout semantics and returns
-the output captured before timeout. Transport loss, target reboot, secret
+Execution timeout sends Ctrl-C, records terminal `timeout`, and disables new AI
+transactions until a configured target shell prompt proves resynchronization.
+If prompt recognition is unavailable (including SSH), the transport is closed
+and enters reconnecting. `timeout_ms` must be 1..300000 (five minutes) and is
+validated by CLI and daemon before duration conversion or proposal creation.
+Transport loss, target reboot, secret
 window entry, daemon shutdown, and user takeover retain their existing terminal
 states. The diagnostic client never retries or reconnects automatically.
 

@@ -34,6 +34,7 @@ type daemonServer interface {
 	Close() error
 }
 type daemonListenFunc func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error)
+type daemonShutdown interface{ Shutdown() }
 
 type listenerGroup []daemonServer
 
@@ -246,6 +247,9 @@ func serveDaemonSockets(dataDir, board string, autoReadonly bool, disp ipc.Dispa
 	select {
 	case <-stop:
 		logger.Print("gatewayd: shutting down")
+		if shutdown, ok := disp.(daemonShutdown); ok {
+			shutdown.Shutdown()
+		}
 		return nil
 	case err := <-errs:
 		return err

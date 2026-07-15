@@ -5,6 +5,10 @@ package command
 
 import "time"
 
+// MaxDiagnosticTimeoutMS is the daemon-enforced maximum automatic
+// diagnostic runtime (five minutes).
+const MaxDiagnosticTimeoutMS int64 = 300000
+
 // ProposalState is the lifecycle state of a Proposal.
 type ProposalState string
 

@@ -54,6 +54,12 @@ read-only vendor argv forms, but cannot override common denials. Unknown tools,
 substitutions, redirections, sensitive paths, and state changes are rejected
 before the UART is written.
 
+Automatic diagnostic timeouts are limited to five minutes. On timeout the
+daemon sends Ctrl-C and keeps AI execution disabled until it recognizes the
+configured shell prompt, preventing late output from corrupting the next
+transaction's attribution. File-content diagnostics are limited to exact safe
+`/proc` facts because host policy cannot resolve target symlinks or hard links.
+
 For denied commands, use `gateway propose` and review in `gateway attach`.
 Only after explicit chat confirmation may a local agent use `gateway approve
 --proposal ID --confirmation 'operator confirmed in chat'`. That delegates
