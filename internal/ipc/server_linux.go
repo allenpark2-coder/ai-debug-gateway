@@ -76,7 +76,9 @@ type Server struct {
 }
 
 // Listen creates (or replaces a stale) owner-only (0600) Unix domain
-// socket at path, serving role.
+// socket at path, serving role. The caller must call Serve exactly
+// once (typically as `go srv.Serve()`) for every successful Listen;
+// Close's Wait would otherwise block forever.
 func Listen(path string, role Role, dispatch Dispatcher) (*Server, error) {
 	_ = os.Remove(path) // a stale socket from a previous clean shutdown
 
@@ -89,11 +91,20 @@ func Listen(path string, role Role, dispatch Dispatcher) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{role: role, dispatch: dispatch, listener: l, quit: make(chan struct{})}, nil
+	s := &Server{role: role, dispatch: dispatch, listener: l, quit: make(chan struct{})}
+	// Added here, synchronously, before any goroutine exists to race a
+	// concurrent Close's Wait against; Serve balances this with Done.
+	s.wg.Add(1)
+	return s, nil
 }
 
-// Serve accepts connections until Close is called.
+// Serve accepts connections until Close is called. Listen already
+// called wg.Add(1) for this call synchronously, before any goroutine
+// existed to race a concurrent Close's Wait against; Serve balances it
+// with Done on every return path.
 func (s *Server) Serve() error {
+	defer s.wg.Done()
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
