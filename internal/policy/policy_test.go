@@ -76,3 +76,61 @@ func TestCommonPolicyAdversarialForms(t *testing.T) {
 		})
 	}
 }
+
+func TestCommonPolicyRejectsUnknownOptionsAndSecretOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"ps environment modifier", `ps -eE`},
+		{"ps unknown long option", `ps --everything`},
+		{"free unknown option", `free --write-cache`},
+		{"uptime unknown option", `uptime --all`},
+		{"full environment", `printenv`},
+		{"secret environment name", `printenv API_TOKEN`},
+		{"password environment name", `printenv DB_PASSWORD`},
+		{"cat unknown option", `cat --output=/tmp/x /etc/os-release`},
+		{"head unknown option", `head --output=/tmp/x /etc/os-release`},
+		{"wc path option", `wc --files0-from=/etc/shadow`},
+		{"wc separated path option", `wc --files0-from /etc/shadow`},
+		{"readlink unknown option", `readlink --read-secrets /etc/os-release`},
+		{"ls unknown option", `ls --passwords`},
+		{"stat unknown option", `stat --write /tmp/x`},
+		{"du unknown option", `du --files0-from=/etc/shadow`},
+		{"find unknown predicate", `find / -unknown-predicate value`},
+		{"find printf action", `find / -printf '%p\n'`},
+		{"find newer secret operand", `find / -newer /etc/shadow`},
+		{"ethtool extra query operands", `ethtool -i eth0 unexpected`},
+		{"type unknown option", `type --dump-all sh`},
+	}
+	p := Common()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.Evaluate(tt.text); got.Allowed {
+				t.Errorf("Evaluate(%q) = %+v, want denied", tt.text, got)
+			}
+		})
+	}
+}
+
+func TestCommonPolicyAllowsExactDiagnosticForms(t *testing.T) {
+	tests := []string{
+		`ps -ef`, `free -m`, `uptime -p`, `df -h /`,
+		`printenv PATH LANG`, `head -n 20 /var/log/messages`,
+		`tail -c 128 /var/log/messages`, `wc -l /etc/os-release`,
+		`readlink -f /proc/self/exe`, `ls -la /tmp`,
+		`stat -L /etc/os-release`, `du -sh /var/log`,
+		`find /proc -maxdepth 2 -type f -name status -print`,
+		`ethtool -i eth0`,
+		`find -L /sys -maxdepth 1 -type l -print`,
+		`type -a sh`,
+	}
+	p := Common()
+	for _, text := range tests {
+		t.Run(text, func(t *testing.T) {
+			if got := p.Evaluate(text); !got.Allowed {
+				t.Errorf("Evaluate(%q) = %+v, want allowed", text, got)
+			}
+		})
+	}
+}

@@ -7,16 +7,31 @@ import (
 
 func Common() *Policy {
 	p := &Policy{commands: make(map[string]validator)}
-	for _, command := range []string{"ps", "free", "uptime", "df", "findmnt", "ss", "netstat", "logread", "uname", "id", "whoami", "groups", "pwd"} {
-		p.commands[command] = optionsOnly(command)
-	}
-	p.commands["printenv"] = pureCommand("printenv")
-	p.commands["which"] = pureCommand("which")
+	p.commands["ps"] = exactOptions("ps", []string{"-A", "-a", "-e", "-f", "-l", "-T", "-w", "-x", "-ef"})
+	p.commands["free"] = exactOptions("free", []string{"-b", "-k", "-m", "-g", "-h", "-w", "-t"})
+	p.commands["uptime"] = exactOptions("uptime", []string{"-p", "--pretty", "-s", "--since", "-V", "--version"})
+	p.commands["df"] = exactPathOptions("df", []string{"-a", "-h", "-H", "-i", "-k", "-l", "-P", "-T"})
+	p.commands["findmnt"] = exactOptions("findmnt", []string{"-a", "--all", "-l", "--list", "-r", "--raw", "-n", "--noheadings"})
+	p.commands["ss"] = exactOptions("ss", []string{"-a", "-l", "-n", "-t", "-u", "-x", "-4", "-6", "-s"})
+	p.commands["netstat"] = exactOptions("netstat", []string{"-a", "-l", "-n", "-r", "-s", "-t", "-u", "-x", "-w"})
+	p.commands["logread"] = exactOptions("logread", []string{"-f", "-F", "-r"})
+	p.commands["uname"] = exactOptions("uname", []string{"-a", "-s", "-n", "-r", "-v", "-m", "-p", "-i", "-o"})
+	p.commands["id"] = exactOptionsWithOperands("id", []string{"-a", "-g", "-G", "-n", "-r", "-u", "-Z"})
+	p.commands["groups"] = exactOptionsWithOperands("groups", nil)
+	p.commands["whoami"] = exactOptions("whoami", nil)
+	p.commands["pwd"] = exactOptions("pwd", []string{"-L", "-P"})
+	p.commands["printenv"] = printenvCommand
+	p.commands["which"] = exactOptionsWithOperands("which", []string{"-a"})
 	p.commands["mount"] = mountCommand
 	p.commands["dmesg"] = dmesgCommand
-	for _, command := range []string{"cat", "head", "tail", "wc", "readlink", "ls", "stat", "du"} {
-		p.commands[command] = pathCommand(command)
-	}
+	p.commands["cat"] = exactPathOptions("cat", []string{"-A", "-b", "-e", "-E", "-n", "-s", "-t", "-T", "-u", "-v"})
+	p.commands["head"] = headTailCommand("head")
+	p.commands["tail"] = headTailCommand("tail")
+	p.commands["wc"] = exactPathOptions("wc", []string{"-c", "--bytes", "-l", "--lines", "-m", "--chars", "-w", "--words", "-L", "--max-line-length"})
+	p.commands["readlink"] = exactPathOptions("readlink", []string{"-f", "--canonicalize", "-e", "--canonicalize-existing", "-m", "--canonicalize-missing", "-n", "--no-newline", "-q", "-s", "-v", "-z", "--zero"})
+	p.commands["ls"] = exactPathOptions("ls", []string{"-a", "-A", "-d", "-F", "-h", "-i", "-l", "-la", "-al", "-lh", "-hl", "-lah", "-alh", "-n", "-r", "-R", "-s", "-t", "-u"})
+	p.commands["stat"] = statCommand
+	p.commands["du"] = duCommand
 	p.commands["sed"] = sedCommand
 	p.commands["tr"] = trCommand
 	p.commands["top"] = topCommand
@@ -33,25 +48,40 @@ func Common() *Policy {
 	return p
 }
 
-func pureCommand(command string) validator {
-	return func([]string) Decision { return allow("command." + command) }
-}
-
-func optionsOnly(command string) validator {
+func exactOptions(command string, options []string) validator {
 	return func(argv []string) Decision {
 		for _, arg := range argv[1:] {
-			if !strings.HasPrefix(arg, "-") {
-				return deny("command."+command, "positional operands are not allowed for this command")
+			if !contains(options, arg) {
+				return deny("command."+command, "unknown option or positional operand is not allowed")
 			}
 		}
 		return allow("command." + command)
 	}
 }
 
-func pathCommand(command string) validator {
+func exactOptionsWithOperands(command string, options []string) validator {
 	return func(argv []string) Decision {
 		for _, arg := range argv[1:] {
-			if strings.HasPrefix(arg, "-") {
+			if strings.HasPrefix(arg, "-") && !contains(options, arg) {
+				return deny("command."+command, "unknown option is not allowed")
+			}
+		}
+		return allow("command." + command)
+	}
+}
+
+func exactPathOptions(command string, options []string) validator {
+	return func(argv []string) Decision {
+		endOptions := false
+		for _, arg := range argv[1:] {
+			if arg == "--" && !endOptions {
+				endOptions = true
+				continue
+			}
+			if !endOptions && strings.HasPrefix(arg, "-") {
+				if !contains(options, arg) {
+					return deny("command."+command, "unknown option is not allowed")
+				}
 				continue
 			}
 			if reason := unsafePath(arg); reason != "" {
@@ -60,6 +90,103 @@ func pathCommand(command string) validator {
 		}
 		return allow("command." + command)
 	}
+}
+
+func printenvCommand(argv []string) Decision {
+	allowed := []string{"PATH", "LANG", "LC_ALL", "TERM", "SHELL", "USER", "LOGNAME", "HOSTNAME", "TZ"}
+	if len(argv) < 2 {
+		return deny("command.printenv", "dumping the complete environment is not allowed")
+	}
+	for _, name := range argv[1:] {
+		if !contains(allowed, name) {
+			return deny("command.printenv", "environment name is not on the safe allowlist")
+		}
+	}
+	return allow("command.printenv")
+}
+
+func headTailCommand(command string) validator {
+	return func(argv []string) Decision {
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
+			if arg == "--" {
+				return validatePaths(command, argv[i+1:])
+			}
+			if arg == "-q" || arg == "--quiet" || arg == "-v" || arg == "--verbose" {
+				continue
+			}
+			if arg == "-n" || arg == "--lines" || arg == "-c" || arg == "--bytes" {
+				i++
+				if i >= len(argv) || !isCount(argv[i]) {
+					return deny("command."+command, "count option requires a numeric value")
+				}
+				continue
+			}
+			if (strings.HasPrefix(arg, "-n") || strings.HasPrefix(arg, "-c")) && len(arg) > 2 && isCount(arg[2:]) {
+				continue
+			}
+			if strings.HasPrefix(arg, "-") {
+				return deny("command."+command, "unknown option is not allowed")
+			}
+			return validatePaths(command, argv[i:])
+		}
+		return allow("command." + command)
+	}
+}
+
+func statCommand(argv []string) Decision {
+	for i := 1; i < len(argv); i++ {
+		if contains([]string{"-L", "--dereference", "-f", "--file-system", "-t", "--terse"}, argv[i]) {
+			continue
+		}
+		if argv[i] == "-c" || argv[i] == "--format" || argv[i] == "--printf" {
+			i++
+			if i >= len(argv) {
+				return deny("command.stat", "format option requires a value")
+			}
+			continue
+		}
+		if strings.HasPrefix(argv[i], "-") {
+			return deny("command.stat", "unknown option is not allowed")
+		}
+		return validatePaths("stat", argv[i:])
+	}
+	return deny("command.stat", "a path operand is required")
+}
+
+func duCommand(argv []string) Decision {
+	for i := 1; i < len(argv); i++ {
+		if contains([]string{"-a", "-h", "-s", "-k", "-m", "-x", "-L", "-P", "-sh", "-hs"}, argv[i]) {
+			continue
+		}
+		if argv[i] == "-d" || argv[i] == "--max-depth" {
+			i++
+			if i >= len(argv) || !isDecimal(argv[i]) {
+				return deny("command.du", "max depth requires a decimal value")
+			}
+			continue
+		}
+		if strings.HasPrefix(argv[i], "--max-depth=") && isDecimal(strings.TrimPrefix(argv[i], "--max-depth=")) {
+			continue
+		}
+		if strings.HasPrefix(argv[i], "-") {
+			return deny("command.du", "unknown option is not allowed")
+		}
+		return validatePaths("du", argv[i:])
+	}
+	return allow("command.du")
+}
+
+func validatePaths(command string, paths []string) Decision {
+	for _, name := range paths {
+		if strings.HasPrefix(name, "-") {
+			return deny("command."+command, "unknown option is not allowed")
+		}
+		if reason := unsafePath(name); reason != "" {
+			return deny("path.sensitive", reason)
+		}
+	}
+	return allow("command." + command)
 }
 
 func unsafePath(name string) string {
@@ -97,7 +224,7 @@ func sedCommand(argv []string) Decision {
 	if !safeSedPrintProgram(argv[2]) {
 		return deny("command.sed", "only numeric-address print programs are allowed")
 	}
-	return pathCommand("sed")(append([]string{"sed"}, argv[3:]...))
+	return exactPathOptions("sed", nil)(append([]string{"sed"}, argv[3:]...))
 }
 
 func safeSedPrintProgram(program string) bool {
@@ -171,7 +298,7 @@ func ethtoolCommand(argv []string) Decision {
 		return deny("command.ethtool", "extra ethtool operands are not allowed")
 	}
 	readOptions := []string{"-i", "--driver", "-k", "--show-features", "-g", "--show-ring", "-c", "--show-coalesce", "-a", "--show-pause", "-S", "--statistics", "-T", "--show-time-stamping", "-P", "--show-permaddr", "-l", "--show-channels", "-m", "--dump-module-eeprom", "-e", "--eeprom-dump", "-d", "--register-dump"}
-	if !contains(readOptions, argv[1]) || len(argv) < 3 {
+	if !contains(readOptions, argv[1]) || len(argv) != 3 {
 		return deny("command.ethtool", "only explicit read-only ethtool queries are allowed")
 	}
 	return allow("command.ethtool")
@@ -211,15 +338,29 @@ func dateCommand(argv []string) Decision {
 }
 
 func findCommand(argv []string) Decision {
-	mutating := []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
-	for _, arg := range argv[1:] {
-		if contains(mutating, arg) {
-			return deny("command.find", "find mutation or command-execution actions are not allowed")
+	args := argv[1:]
+	i := 0
+	for i < len(args) && contains([]string{"-H", "-L", "-P"}, args[i]) {
+		i++
+	}
+	for i < len(args) && !strings.HasPrefix(args[i], "-") && args[i] != "!" && args[i] != "(" && args[i] != ")" {
+		if reason := unsafePath(args[i]); reason != "" {
+			return deny("path.sensitive", reason)
 		}
-		if !strings.HasPrefix(arg, "-") {
-			if reason := unsafePath(arg); reason != "" {
-				return deny("path.sensitive", reason)
+		i++
+	}
+	for i < len(args) {
+		arg := args[i]
+		switch {
+		case contains([]string{"!", "(", ")", "-not", "-a", "-and", "-o", "-or", "-print", "-print0", "-ls", "-prune", "-quit", "-empty", "-readable", "-xdev", "-mount"}, arg):
+			i++
+		case contains([]string{"-name", "-iname", "-path", "-ipath", "-type", "-user", "-group", "-size", "-mtime", "-mmin", "-maxdepth", "-mindepth", "-links", "-inum", "-perm"}, arg):
+			if i+1 >= len(args) {
+				return deny("command.find", "find test requires exactly one operand")
 			}
+			i += 2
+		default:
+			return deny("command.find", "unknown find option, predicate, or action is not allowed")
 		}
 	}
 	return allow("command.find")
@@ -231,8 +372,19 @@ func literalOutput(command string) validator {
 
 func lookupCommand(command string) validator {
 	return func(argv []string) Decision {
-		if command == "command" && (len(argv) < 3 || argv[1] != "-v") || len(argv) < 2 {
+		if command == "command" {
+			if len(argv) < 3 || argv[1] != "-v" {
+				return deny("command.command", "only command -v lookups are allowed")
+			}
+			return allow("command.command")
+		}
+		if len(argv) < 2 {
 			return deny("command."+command, "only executable lookup is allowed")
+		}
+		for i, arg := range argv[1:] {
+			if strings.HasPrefix(arg, "-") && (i > 0 || !contains([]string{"-a", "-f", "-p", "-P", "-t"}, arg)) {
+				return deny("command.type", "unknown type option is not allowed")
+			}
 		}
 		return allow("command." + command)
 	}
@@ -257,4 +409,9 @@ func isDecimal(value string) bool {
 		}
 	}
 	return true
+}
+
+func isCount(value string) bool {
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "+"), "-")
+	return isDecimal(value)
 }
