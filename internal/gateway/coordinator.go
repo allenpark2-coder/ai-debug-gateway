@@ -304,6 +304,12 @@ func (c *Coordinator) Reject(proposalID string) error {
 	return c.commands.Reject(proposalID)
 }
 
+// Edit replaces a pending proposal with a new one carrying text and
+// purpose; it does not approve or execute anything.
+func (c *Coordinator) Edit(proposalID, text, purpose string) (*command.Proposal, error) {
+	return c.commands.Edit(proposalID, text, purpose)
+}
+
 // PendingForSession returns every currently pending proposal for
 // sessionID.
 func (c *Coordinator) PendingForSession(sessionID string) []*command.Proposal {

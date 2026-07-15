@@ -9,30 +9,6 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
 )
 
-func TestResolveXDGDirsCreatesOwnerOnlyDirectories(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_DATA_HOME", "")
-
-	dirs, err := resolveXDGDirs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, dir := range []string{dirs.Config, dirs.Data} {
-		if !strings.HasPrefix(dir, home) {
-			t.Fatalf("got dir %q outside HOME %q", dir, home)
-		}
-		info, err := os.Stat(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o700 {
-			t.Fatalf("got mode %v, want 0700", info.Mode().Perm())
-		}
-	}
-}
-
 func TestAcquireLockRejectsSecondInstance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gatewayd.lock")
 

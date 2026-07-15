@@ -102,6 +102,8 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 		return d.commandApprove(req.Payload)
 	case v1.OpCommandReject:
 		return d.commandReject(req.Payload)
+	case v1.OpCommandEdit:
+		return d.commandEdit(req.Payload)
 	case v1.OpTransportWrite:
 		return d.transportWrite(req.Payload)
 	case v1.OpRetryUART:
@@ -275,6 +277,24 @@ func (d *dispatcher) commandReject(payload json.RawMessage) (any, *v1.ProtocolEr
 		return nil, badPayload(err)
 	}
 	return map[string]string{"proposal_id": p.ProposalID, "state": "rejected"}, nil
+}
+
+type commandEditPayload struct {
+	ProposalID string `json:"proposal_id"`
+	Text       string `json:"text"`
+	Purpose    string `json:"purpose"`
+}
+
+func (d *dispatcher) commandEdit(payload json.RawMessage) (any, *v1.ProtocolError) {
+	var p commandEditPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, badPayload(err)
+	}
+	next, err := d.coord.Edit(p.ProposalID, p.Text, p.Purpose)
+	if err != nil {
+		return nil, badPayload(err)
+	}
+	return next, nil
 }
 
 type transportWritePayload struct {

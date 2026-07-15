@@ -1,0 +1,253 @@
+// Command gateway is the human attach terminal and the non-interactive
+// control CLI. It never owns the serial device or SSH connection
+// itself; gatewayd does, over an owner-only Unix domain socket this
+// binary dials.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"syscall"
+
+	"golang.org/x/term"
+
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/cli"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/profile"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport/serial"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/xdgpaths"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+
+	dirs, err := xdgpaths.Resolve()
+	if err != nil {
+		fatal(err)
+	}
+	profileDir := filepath.Join(dirs.Config, "profiles")
+	controlSock := filepath.Join(dirs.Data, "gatewayd.control.sock")
+	attachSock := filepath.Join(dirs.Data, "gatewayd.attach.sock")
+
+	args := os.Args[2:]
+	switch os.Args[1] {
+	case "ports":
+		runControl(controlSock, func(c *cli.Client) error { return printResult(c.PortsList()) })
+	case "profile":
+		if len(args) < 1 || args[0] != "create" {
+			usage()
+			os.Exit(2)
+		}
+		if err := profileCreate(profileDir); err != nil {
+			fatal(err)
+		}
+	case "start":
+		board := flagValue(args, "--board")
+		runControl(controlSock, func(c *cli.Client) error { return printResult(c.SessionStart(board)) })
+	case "status":
+		runControl(controlSock, func(c *cli.Client) error { return printResult(c.SessionStatus()) })
+	case "output":
+		after := parseUint(flagValue(args, "--after"))
+		runControl(controlSock, func(c *cli.Client) error { return printResult(c.OutputRead(after, 64*1024)) })
+	case "propose":
+		text := flagValue(args, "--text")
+		purpose := flagValue(args, "--purpose")
+		timeoutMS := parseInt(flagValue(args, "--timeout-ms"))
+		session := flagValue(args, "--session")
+		runControl(controlSock, func(c *cli.Client) error {
+			return printResult(c.CommandPropose(session, text, purpose, timeoutMS))
+		})
+	case "export":
+		runControl(controlSock, func(c *cli.Client) error { return printResult(c.RecordsExport(0, 0)) })
+	case "attach":
+		runAttach(attachSock)
+	default:
+		usage()
+		os.Exit(2)
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, `usage: gateway <command> [flags]
+
+commands:
+  ports                                    list discovered serial ports
+  profile create                           interactively create a board profile
+  start [--board NAME]                     start a session
+  status                                   report session state
+  output --after N                         read console output after sequence N
+  propose --session ID --text TEXT --purpose P --timeout-ms MS
+  export                                   export transcript/audit records
+  attach                                   attach the interactive terminal`)
+}
+
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func parseUint(s string) uint64 {
+	v, _ := strconv.ParseUint(s, 10, 64)
+	return v
+}
+
+func parseInt(s string) int64 {
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
+}
+
+func fatal(err error) {
+	fmt.Fprintln(os.Stderr, "gateway:", err)
+	os.Exit(1)
+}
+
+func runControl(socketPath string, fn func(*cli.Client) error) {
+	c, err := cli.Dial(socketPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer c.Close()
+	if err := fn(c); err != nil {
+		fatal(err)
+	}
+}
+
+func printResult(data json.RawMessage, err error) error {
+	if err != nil {
+		return err
+	}
+	os.Stdout.Write(data)
+	fmt.Println()
+	return nil
+}
+
+func runAttach(socketPath string) {
+	c, err := cli.Dial(socketPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer c.Close()
+
+	restore, err := enterRawMode(os.Stdin)
+	if err != nil {
+		fatal(err)
+	}
+	defer restore()
+
+	if err := cli.Attach(c, os.Stdin, os.Stdout, cli.DefaultAttachOptions()); err != nil {
+		restore()
+		fatal(err)
+	}
+}
+
+func profileCreate(profileDir string) error {
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		return err
+	}
+
+	ports, err := serial.List()
+	if err != nil {
+		return err
+	}
+	fmt.Println("discovered ports:")
+	for i, p := range ports {
+		fmt.Printf("  [%d] %s (by-id: %s)\n", i, p.Path, p.ByIDPath)
+	}
+
+	stdin := bufio.NewReader(os.Stdin)
+	name := prompt(stdin, "profile name")
+	idx := parseInt(prompt(stdin, "port index"))
+	if idx < 0 || int(idx) >= len(ports) {
+		return fmt.Errorf("gateway: port index %d out of range", idx)
+	}
+	baud := parseInt(prompt(stdin, "baud rate (e.g. 115200)"))
+	dataBits := parseInt(prompt(stdin, "data bits (5-8, e.g. 8)"))
+	parity := prompt(stdin, "parity (none/odd/even)")
+	stopBits := parseInt(prompt(stdin, "stop bits (1 or 2)"))
+	flow := prompt(stdin, "flow control (none/hardware/software)")
+
+	line := serial.LineSettings{
+		BaudRate: int(baud),
+		DataBits: int(dataBits),
+		Parity:   serial.Parity(parity),
+		StopBits: int(stopBits),
+		Flow:     serial.FlowControl(flow),
+	}
+	if err := line.Validate(); err != nil {
+		return err
+	}
+
+	port := ports[idx]
+	if !port.Identity().Known() {
+		return fmt.Errorf("gateway: port %q has no stable USB identity; refusing to save a profile that could later match a different device", port.Path)
+	}
+
+	return profile.Save(profileDir, profile.Profile{
+		Name: name,
+		UART: &profile.UARTConfig{Identity: port.Identity(), Line: line},
+	})
+}
+
+func prompt(r *bufio.Reader, label string) string {
+	fmt.Printf("%s: ", label)
+	line, _ := r.ReadString('\n')
+	for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
+// enterRawMode puts f into raw terminal mode (no-op if f is not a
+// terminal, e.g. piped test input) and arms SIGINT/SIGTERM handling so
+// the terminal is restored on every exit path, not only a clean
+// return. The returned restore func is idempotent and safe to call
+// from both the normal defer and the signal handler.
+func enterRawMode(f *os.File) (restore func(), err error) {
+	fd := int(f.Fd())
+	if !term.IsTerminal(fd) {
+		return func() {}, nil
+	}
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+
+	restored := false
+	restoreOnce := func() {
+		if restored {
+			return
+		}
+		restored = true
+		_ = term.Restore(fd, oldState)
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sig:
+			restoreOnce()
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+
+	return func() {
+		close(done)
+		signal.Stop(sig)
+		restoreOnce()
+	}, nil
+}

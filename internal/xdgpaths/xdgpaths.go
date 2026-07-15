@@ -1,4 +1,8 @@
-package main
+// Package xdgpaths resolves the shared config and data directories
+// that gatewayd and gateway must agree on byte-for-byte, since gateway
+// locates gatewayd's Unix domain sockets and profile files by
+// re-deriving these same paths independently.
+package xdgpaths
 
 import (
 	"os"
@@ -7,18 +11,18 @@ import (
 
 const appName = "ai-debug-gateway"
 
-// dirs is the daemon's resolved filesystem locations.
-type dirs struct {
+// Dirs is the resolved set of filesystem locations.
+type Dirs struct {
 	Config string
 	Data   string
 }
 
-// resolveXDGDirs resolves the config and data directories, creating
-// them with owner-only (0700) permissions if missing.
-func resolveXDGDirs() (dirs, error) {
+// Resolve resolves the config and data directories, creating them
+// with owner-only (0700) permissions if missing.
+func Resolve() (Dirs, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return dirs{}, err
+		return Dirs{}, err
 	}
 
 	configBase := os.Getenv("XDG_CONFIG_HOME")
@@ -30,13 +34,13 @@ func resolveXDGDirs() (dirs, error) {
 		dataBase = filepath.Join(home, ".local", "share")
 	}
 
-	d := dirs{
+	d := Dirs{
 		Config: filepath.Join(configBase, appName),
 		Data:   filepath.Join(dataBase, appName),
 	}
 	for _, dir := range []string{d.Config, d.Data} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return dirs{}, err
+			return Dirs{}, err
 		}
 	}
 	return d, nil

@@ -17,6 +17,7 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/transcript"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/gateway"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/xdgpaths"
 )
 
 // defaultLoginConfig is a reasonable first-release default for
@@ -84,7 +85,7 @@ func run() error {
 		username = "root"
 	}
 
-	d, err := resolveXDGDirs()
+	d, err := xdgpaths.Resolve()
 	if err != nil {
 		return err
 	}
