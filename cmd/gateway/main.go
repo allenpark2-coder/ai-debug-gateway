@@ -25,6 +25,13 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/xdgpaths"
 )
 
+// version and commit are set at build time via -ldflags "-X main.version=... -X main.commit=..."
+// by scripts/build-release.sh; a plain `go build` leaves them at these defaults.
+var (
+	version = "dev"
+	commit  = "none"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -56,6 +63,9 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 
 	args := argv[1:]
 	switch argv[0] {
+	case "version":
+		_, err := fmt.Fprintf(stdout, "gateway version=%s commit=%s\n", version, commit)
+		return err
 	case "ports":
 		return runClient(sockets.Control, dial, func(c *cli.Client) error { data, err := c.PortsList(); return printResultTo(stdout, data, err) })
 	case "profile":
@@ -171,6 +181,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: gateway <command> [flags]
 
 commands:
+  version                                   print the build version and commit
   ports                                    list discovered serial ports
   profile create                           interactively create a board profile
   start [--board NAME] [--transport uart|ssh] [--ssh-password PW] [--ssh-accept-host]

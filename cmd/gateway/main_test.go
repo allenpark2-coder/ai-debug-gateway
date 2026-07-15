@@ -40,6 +40,18 @@ func testCLIServer(t *testing.T, role ipc.Role, d *cliCaptureDispatcher) string 
 	return path
 }
 
+func TestVersionCommandPrintsBuildMetadataWithoutDialing(t *testing.T) {
+	dials := 0
+	var stdout bytes.Buffer
+	err := runCLI([]string{"version"}, socketPaths{}, func(string) (*cli.Client, error) { dials++; return nil, nil }, &stdout, &bytes.Buffer{})
+	if err != nil || dials != 0 {
+		t.Fatalf("err=%v dials=%d", err, dials)
+	}
+	if !strings.Contains(stdout.String(), version) || !strings.Contains(stdout.String(), commit) {
+		t.Fatalf("stdout = %q, want version %q and commit %q", stdout.String(), version, commit)
+	}
+}
+
 func TestDiagnoseRoutesValidRequestAndPrintsCommandFirst(t *testing.T) {
 	d := &cliCaptureDispatcher{}
 	path := testCLIServer(t, ipc.RoleDiagnose, d)
