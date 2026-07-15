@@ -28,6 +28,7 @@ const (
 	RoleControl Role = iota
 	RoleAttach
 	RoleDiagnose
+	RoleUnsafeShell
 )
 
 func (r Role) String() string {
@@ -36,6 +37,8 @@ func (r Role) String() string {
 		return "attach"
 	case RoleDiagnose:
 		return "diagnose"
+	case RoleUnsafeShell:
+		return "unsafeshell"
 	default:
 		return "control"
 	}
@@ -62,12 +65,24 @@ var diagnoseAllowed = map[string]bool{
 	v1.OpDiagnoseExecute: true,
 }
 
+// unsafeShellAllowed is deliberately its own map, not a superset or
+// variant of diagnoseAllowed: RoleDiagnose and RoleUnsafeShell must stay
+// disjoint so a bug in one allowlist can never grant the other role's
+// operation.
+var unsafeShellAllowed = map[string]bool{
+	v1.OpSessionStatus:      true,
+	v1.OpOutputRead:         true,
+	v1.OpUnsafeShellExecute: true,
+}
+
 func permitted(role Role, operation string) bool {
 	switch role {
 	case RoleAttach:
 		return true
 	case RoleDiagnose:
 		return diagnoseAllowed[operation]
+	case RoleUnsafeShell:
+		return unsafeShellAllowed[operation]
 	default:
 		return controlAllowed[operation]
 	}

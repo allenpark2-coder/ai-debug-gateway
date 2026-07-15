@@ -162,6 +162,40 @@ func TestDiagnoseRoleCapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestUnsafeShellRoleCapabilityMatrix(t *testing.T) {
+	allowed := []string{v1.OpSessionStatus, v1.OpOutputRead, v1.OpUnsafeShellExecute}
+	denied := []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpRetryUART, v1.OpRetrySSH,
+		v1.OpSecretBegin, v1.OpSessionStart, v1.OpSessionEnd, v1.OpHostKeyAccept, v1.OpDiagnoseExecute}
+
+	for _, op := range allowed {
+		if !permitted(RoleUnsafeShell, op) {
+			t.Errorf("unsafeshell operation %q: got denied, want allowed", op)
+		}
+	}
+	for _, op := range denied {
+		if permitted(RoleUnsafeShell, op) {
+			t.Errorf("unsafeshell operation %q: got allowed, want denied", op)
+		}
+	}
+	if permitted(RoleControl, v1.OpUnsafeShellExecute) {
+		t.Error("control must not reach unsafeshell.execute")
+	}
+	for _, op := range append(append([]string{}, allowed...), denied...) {
+		if !permitted(RoleAttach, op) {
+			t.Errorf("attach operation %q: behavior changed to denied", op)
+		}
+	}
+}
+
+func TestDiagnoseAndUnsafeShellRolesAreDisjoint(t *testing.T) {
+	if permitted(RoleDiagnose, v1.OpUnsafeShellExecute) {
+		t.Error("diagnose must not reach unsafeshell.execute")
+	}
+	if permitted(RoleUnsafeShell, v1.OpDiagnoseExecute) {
+		t.Error("unsafeshell must not reach diagnose.execute")
+	}
+}
+
 func TestAttachConnectionCanApprove(t *testing.T) {
 	path, _ := newTestServer(t, RoleAttach)
 	c, err := Dial(path)

@@ -16,6 +16,8 @@ owner-only permissions if missing:
 | Attach socket (human-only) | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.attach.sock` |
 | Diagnose socket (opt-in, policy-limited) | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.diagnose.sock` |
 | Board diagnostic policy | `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json` |
+| Unsafe-shell socket (opt-in, denylist-limited) | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.unsafeshell.sock` |
+| Board unsafe-shell denylist | `$XDG_CONFIG_HOME/ai-debug-gateway/unsafe-shell/<board>.json` |
 | Single-instance lock | `$XDG_DATA_HOME/ai-debug-gateway/gatewayd.lock` |
 | Durable transcript | `$XDG_DATA_HOME/ai-debug-gateway/transcript.jsonl` |
 | Durable audit log | `$XDG_DATA_HOME/ai-debug-gateway/audit.jsonl` |
@@ -60,11 +62,34 @@ configured shell prompt, preventing late output from corrupting the next
 transaction's attribution. File-content diagnostics are limited to exact safe
 `/proc` facts because host policy cannot resolve target symlinks or hard links.
 
+A separate, independently opt-in denylist mode allows unattended
+state-changing commands:
+
+```sh
+gatewayd --unsafe-auto-shell=myboard
+gateway unsafe-shell --session SESSION_ID --text 'mount -o remount,rw /' \
+  --purpose 'need rw to patch config' --timeout-ms 15000
+```
+
+This is a deliberate operator risk transfer, not a hardened default: use it
+only on a board recoverable by reflashing firmware, with no OTP/eFuse or
+other operation a reflash cannot undo. It requires its own file at
+`$XDG_CONFIG_HOME/ai-debug-gateway/unsafe-shell/<board>.json`, mode `0600`,
+containing at least `{"risk_accepted": true}` -- an explicit per-board
+attestation, without which this socket does not start (manual mode and
+`--auto-readonly` are unaffected). Interpreters, `eval`, command/process
+substitution, indirect execution (`exec`, `env`, `xargs`, `find -exec`), and
+sensitive-path reads remain denied unconditionally; the file can only add
+further denials (`deny_executables`, `deny_exact`), never an exception to
+them. `--auto-readonly` and `--unsafe-auto-shell` can run on the same daemon
+without either affecting the other's policy or socket.
+
 For denied commands, use `gateway propose` and review in `gateway attach`.
 Only after explicit chat confirmation may a local agent use `gateway approve
 --proposal ID --confirmation 'operator confirmed in chat'`. That delegates
-attach capability for the mutation; control and diagnose sockets remain unable
-to approve. Confirmation is stored only as redacted audit metadata.
+attach capability for the mutation; control, diagnose, and unsafe-shell
+sockets remain unable to approve. Confirmation is stored only as redacted
+audit metadata.
 
 If `gatewayd` was killed or crashed while a transaction was approved or
 running, the next startup finalizes it as `daemon-restarted` in the

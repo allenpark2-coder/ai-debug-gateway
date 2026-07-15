@@ -93,7 +93,7 @@ func TestServeDaemonSocketsAreOptInAndCloseTogether(t *testing.T) {
 			var logs syncBuffer
 			done := make(chan error, 1)
 			go func() {
-				done <- serveDaemonSockets(t.TempDir(), "board-1", auto, nil, stop, listen, log.New(&logs, "", 0))
+				done <- serveDaemonSockets(t.TempDir(), "board-1", auto, false, nil, stop, listen, log.New(&logs, "", 0))
 			}()
 			want := 2
 			if auto {
@@ -141,7 +141,7 @@ func TestServeDaemonSocketsLogsBoardName(t *testing.T) {
 	var logs syncBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(t.TempDir(), "camera-7", false, nil, stop, listen, log.New(&logs, "", 0))
+		done <- serveDaemonSockets(t.TempDir(), "camera-7", false, false, nil, stop, listen, log.New(&logs, "", 0))
 	}()
 	<-created
 	<-created
@@ -168,7 +168,7 @@ func TestServeDaemonSocketsClosesAllOnServerError(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(t.TempDir(), "board-1", true, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+		done <- serveDaemonSockets(t.TempDir(), "board-1", true, false, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
 	}()
 	for i := 0; i < 3; i++ {
 		<-created
@@ -202,7 +202,7 @@ func TestServeDaemonSocketsShutsDispatcherBeforeWaitingHandlersOnListenerError(t
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(t.TempDir(), "board", false, disp, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+		done <- serveDaemonSockets(t.TempDir(), "board", false, false, disp, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
 	}()
 	<-created
 	<-created
@@ -234,7 +234,7 @@ func TestServeDaemonSocketsTreatsNilServeReturnAsFailure(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(t.TempDir(), "board-1", false, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
+		done <- serveDaemonSockets(t.TempDir(), "board-1", false, false, nil, make(chan os.Signal), listen, log.New(io.Discard, "", 0))
 	}()
 	for i := 0; i < 2; i++ {
 		<-created
@@ -255,7 +255,7 @@ func TestShutdownClosesEveryListenerBeforeWaitingForHeldClient(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(dir, "board-1", true, nil, stop,
+		done <- serveDaemonSockets(dir, "board-1", true, false, nil, stop,
 			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 				return ipc.Listen(path, role, dispatch)
 			},
@@ -317,7 +317,7 @@ func TestDiagnoseSocketHasOwnerOnlyMode(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(dir, "board-1", true, nil, stop,
+		done <- serveDaemonSockets(dir, "board-1", true, false, nil, stop,
 			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 				return ipc.Listen(path, role, dispatch)
 			},
@@ -342,6 +342,118 @@ func TestDiagnoseSocketHasOwnerOnlyMode(t *testing.T) {
 	}
 }
 
+func TestUnsafeShellSocketIsOptInAndClosesTogether(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordinary", true: "enabled"}[enabled], func(t *testing.T) {
+			var paths []string
+			var servers []*fakeDaemonServer
+			created := make(chan struct{}, 3)
+			listen := func(path string, _ ipc.Role, _ ipc.Dispatcher) (daemonServer, error) {
+				paths = append(paths, path)
+				s := newFakeDaemonServer()
+				servers = append(servers, s)
+				created <- struct{}{}
+				return s, nil
+			}
+			stop := make(chan os.Signal, 1)
+			var logs syncBuffer
+			done := make(chan error, 1)
+			go func() {
+				done <- serveDaemonSockets(t.TempDir(), "board-1", false, enabled, nil, stop, listen, log.New(&logs, "", 0))
+			}()
+			want := 2
+			if enabled {
+				want = 3
+			}
+			for i := 0; i < want; i++ {
+				<-created
+			}
+			if len(paths) != want {
+				t.Fatalf("paths = %v", paths)
+			}
+			joined := strings.Join(paths, " ")
+			if strings.Contains(joined, "unsafeshell") != enabled {
+				t.Fatalf("paths = %v", paths)
+			}
+			for deadline := time.Now().Add(time.Second); logs.String() == "" && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
+			if strings.Contains(logs.String(), "unsafeshell=") != enabled {
+				t.Fatalf("logs = %q", logs.String())
+			}
+			stop <- os.Interrupt
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range servers {
+				select {
+				case <-s.closed:
+				default:
+					t.Fatal("server not closed")
+				}
+			}
+		})
+	}
+}
+
+func TestUnsafeShellSocketHasOwnerOnlyMode(t *testing.T) {
+	dir := t.TempDir()
+	stop := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(dir, "board-1", false, true, nil, stop,
+			func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
+				return ipc.Listen(path, role, dispatch)
+			},
+			log.New(io.Discard, "", 0))
+	}()
+	path := filepath.Join(dir, "gatewayd.unsafeshell.sock")
+	var info os.FileInfo
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		var err error
+		info, err = os.Stat(path)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if info == nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("socket info = %v", info)
+	}
+	stop <- os.Interrupt
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOrdinaryStartupRemovesStaleUnsafeShellSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gatewayd.unsafeshell.sock")
+	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	listen := func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error) {
+		created <- struct{}{}
+		return newFakeDaemonServer(), nil
+	}
+	stop := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveDaemonSockets(dir, "board-1", false, false, nil, stop, listen, log.New(io.Discard, "", 0))
+	}()
+	for i := 0; i < 2; i++ {
+		<-created
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stale unsafe-shell socket remains: %v", err)
+	}
+	stop <- os.Interrupt
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOrdinaryStartupRemovesStaleDiagnoseSocket(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gatewayd.diagnose.sock")
@@ -356,7 +468,7 @@ func TestOrdinaryStartupRemovesStaleDiagnoseSocket(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemonSockets(dir, "board-1", false, nil, stop, listen, log.New(io.Discard, "", 0))
+		done <- serveDaemonSockets(dir, "board-1", false, false, nil, stop, listen, log.New(io.Discard, "", 0))
 	}()
 	for i := 0; i < 2; i++ {
 		<-created
@@ -377,6 +489,14 @@ func TestParseDaemonOptions(t *testing.T) {
 	}
 	if _, err := parseDaemonOptions([]string{"--unknown"}); err == nil {
 		t.Fatal("expected unknown argument to fail")
+	}
+	got, err = parseDaemonOptions([]string{"--unsafe-auto-shell=board-1"})
+	if err != nil || got.UnsafeAutoShell != "board-1" {
+		t.Fatalf("parseDaemonOptions() = %+v, %v", got, err)
+	}
+	got, err = parseDaemonOptions([]string{"--auto-readonly", "--unsafe-auto-shell=board-1"})
+	if err != nil || !got.AutoReadonly || got.UnsafeAutoShell != "board-1" {
+		t.Fatalf("combined flags: parseDaemonOptions() = %+v, %v", got, err)
 	}
 }
 
@@ -416,6 +536,48 @@ func TestLoadDaemonPolicyOnlyWhenAutoReadonlyIsEnabled(t *testing.T) {
 	}
 	if _, err := loadDaemonPolicy(daemonOptions{AutoReadonly: true}, config, "board-1"); err == nil || !strings.Contains(err.Error(), "board policy") {
 		t.Fatalf("invalid diagnose policy error = %v, want clear board policy error", err)
+	}
+}
+
+func TestLoadUnsafeShellDaemonPolicyOnlyWhenFlagNamesABoard(t *testing.T) {
+	config := t.TempDir()
+	shellDir := filepath.Join(config, "unsafe-shell")
+	if err := os.Mkdir(shellDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(shellDir, "board-1.json")
+	if err := os.WriteFile(name, []byte(`{"risk_accepted":true,"deny_executables":["reboot"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := loadUnsafeShellDaemonPolicy(daemonOptions{}, config)
+	if err != nil || p != nil {
+		t.Fatalf("ordinary startup unexpectedly loaded an unsafe-shell policy: %v, %v", p, err)
+	}
+
+	p, err = loadUnsafeShellDaemonPolicy(daemonOptions{UnsafeAutoShell: "board-1"}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Evaluate("reboot").Allowed {
+		t.Fatal("board denylist was not applied")
+	}
+	if !p.Evaluate("mount -o remount,rw /").Allowed {
+		t.Fatal("denylist mode unexpectedly denied an unrelated command")
+	}
+
+	if err := os.WriteFile(name, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p.Evaluate("reboot").Allowed {
+		t.Fatal("policy was live reloaded; a loaded snapshot must be unaffected by a later file change")
+	}
+	if _, err := loadUnsafeShellDaemonPolicy(daemonOptions{UnsafeAutoShell: "board-1"}, config); err == nil || !strings.Contains(err.Error(), "unsafe-shell policy") {
+		t.Fatalf("invalid unsafe-shell policy error = %v, want clear unsafe-shell policy error", err)
+	}
+
+	if _, err := loadUnsafeShellDaemonPolicy(daemonOptions{UnsafeAutoShell: "missing-board"}, config); err == nil {
+		t.Fatal("expected a missing board file to fail")
 	}
 }
 
