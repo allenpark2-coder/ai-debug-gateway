@@ -537,6 +537,19 @@ func TestLoadDaemonPolicyOnlyWhenAutoReadonlyIsEnabled(t *testing.T) {
 	if _, err := loadDaemonPolicy(daemonOptions{AutoReadonly: true}, config, "board-1"); err == nil || !strings.Contains(err.Error(), "board policy") {
 		t.Fatalf("invalid diagnose policy error = %v, want clear board policy error", err)
 	}
+
+	// Board additions are optional: a board without a policy file runs
+	// auto-readonly under the common policy alone.
+	p, err = loadDaemonPolicy(daemonOptions{AutoReadonly: true}, config, "board-without-file")
+	if err != nil {
+		t.Fatalf("missing board file must not be an error, got %v", err)
+	}
+	if !p.Evaluate("uptime").Allowed {
+		t.Fatal("missing board file must fall back to the common policy")
+	}
+	if p.Evaluate("opsis-inspect status").Allowed {
+		t.Fatal("missing board file must not inherit another board's additions")
+	}
 }
 
 func TestLoadUnsafeShellDaemonPolicyOnlyWhenFlagNamesABoard(t *testing.T) {
@@ -603,20 +616,22 @@ func TestAcquireLockRejectsSecondInstance(t *testing.T) {
 }
 
 func TestOpenSetPersistsAcrossReload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "open.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "open.json")
 
 	s1, err := loadOpenSet(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.add("txn-1"); err != nil {
+	if err := s1.add("txn-1", "sess-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.add("txn-2"); err != nil {
+	if err := s1.add("txn-2", "sess-2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.remove("txn-1"); err != nil {
-		t.Fatal(err)
+	aw := audit.NewWriter(filepath.Join(dir, "audit.jsonl"))
+	if ok, err := s1.finalize(aw, "board-1", "txn-1", "transaction=txn-1 status=completed"); !ok || err != nil {
+		t.Fatalf("finalize(txn-1) = %v, %v, want true, nil", ok, err)
 	}
 
 	info, err := os.Stat(path)
@@ -643,12 +658,12 @@ func TestRecoverIncompleteTransactionsFinalizesAndClearsOpenSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := open.add("txn-stale"); err != nil {
+	if err := open.add("txn-stale", "sess-stale"); err != nil {
 		t.Fatal(err)
 	}
 
 	aw := audit.NewWriter(filepath.Join(dir, "audit.jsonl"))
-	if err := recoverIncompleteTransactions(open, aw); err != nil {
+	if err := recoverIncompleteTransactions(open, aw, "board-1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -664,9 +679,69 @@ func TestRecoverIncompleteTransactionsFinalizesAndClearsOpenSet(t *testing.T) {
 	for _, r := range records {
 		if r.Kind == "result" && strings.Contains(r.Detail, "txn-stale") && strings.Contains(r.Detail, "daemon-restarted") {
 			found = true
+			if r.Board != "board-1" || r.Session != "sess-stale" {
+				t.Fatalf("recovery record must be attributed, got board=%q session=%q", r.Board, r.Session)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("expected a daemon-restarted result record for txn-stale, got %+v", records)
+	}
+}
+
+// TestOpenSetFinalizeIsExactlyOnce covers the dispatcher/reconciler
+// race: both may try to finalize the same completed transaction, and
+// only the first attempt may write a result record.
+func TestOpenSetFinalizeIsExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	open, err := loadOpenSet(filepath.Join(dir, "open.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := open.add("txn-1", "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	aw := audit.NewWriter(filepath.Join(dir, "audit.jsonl"))
+	if ok, err := open.finalize(aw, "board-1", "txn-1", "transaction=txn-1 status=completed"); !ok || err != nil {
+		t.Fatalf("first finalize = %v, %v, want true, nil", ok, err)
+	}
+	if ok, err := open.finalize(aw, "board-1", "txn-1", "transaction=txn-1 status=completed"); ok || err != nil {
+		t.Fatalf("second finalize = %v, %v, want false, nil", ok, err)
+	}
+
+	records, err := aw.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := 0
+	for _, r := range records {
+		if r.Kind == "result" {
+			results++
+			if r.Board != "board-1" || r.Session != "sess-1" {
+				t.Fatalf("result record must be attributed, got board=%q session=%q", r.Board, r.Session)
+			}
+		}
+	}
+	if results != 1 {
+		t.Fatalf("got %d result records for one transaction, want exactly 1", results)
+	}
+}
+
+// TestLoadOpenSetAcceptsLegacyListFormat keeps a daemon upgraded across
+// the open-set format change able to recover transactions persisted by
+// the previous version (a bare JSON array of IDs).
+func TestLoadOpenSetAcceptsLegacyListFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "open.json")
+	if err := os.WriteFile(path, []byte(`["txn-legacy"]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	open, err := loadOpenSet(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := open.list()
+	if len(got) != 1 || got[0] != "txn-legacy" {
+		t.Fatalf("got %+v, want [txn-legacy]", got)
 	}
 }

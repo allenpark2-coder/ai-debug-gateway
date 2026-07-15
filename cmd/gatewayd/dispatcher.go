@@ -385,7 +385,7 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	out.Transaction = tx
 	d.audit("transaction", tx.ID)
 	if d.open != nil {
-		_ = d.open.add(tx.ID)
+		_ = d.open.add(tx.ID, tx.SessionID)
 	}
 	res, waitErr := d.coord.WaitResult(d.diagnosticCtx, tx.ID)
 	if waitErr != nil {
@@ -394,10 +394,7 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	if err != nil && res == nil {
 		return nil, badPayload(err)
 	}
-	if d.open != nil {
-		_ = d.open.remove(tx.ID)
-	}
-	d.audit("result", fmt.Sprintf("transaction=%s status=%s", tx.ID, res.Status))
+	d.finalizeResult(tx.ID, res)
 	copyResult := *res
 	copyResult.Output = append([]byte(nil), res.Output...)
 	out.TruncatedStart = copyResult.OutputTruncatedStart
@@ -466,7 +463,7 @@ func (d *dispatcher) unsafeShellExecute(payload json.RawMessage) (any, *v1.Proto
 	out.Transaction = tx
 	d.audit("transaction", tx.ID)
 	if d.open != nil {
-		_ = d.open.add(tx.ID)
+		_ = d.open.add(tx.ID, tx.SessionID)
 	}
 	res, waitErr := d.coord.WaitResult(d.diagnosticCtx, tx.ID)
 	if waitErr != nil {
@@ -475,10 +472,7 @@ func (d *dispatcher) unsafeShellExecute(payload json.RawMessage) (any, *v1.Proto
 	if err != nil && res == nil {
 		return nil, badPayload(err)
 	}
-	if d.open != nil {
-		_ = d.open.remove(tx.ID)
-	}
-	d.audit("result", fmt.Sprintf("transaction=%s status=%s", tx.ID, res.Status))
+	d.finalizeResult(tx.ID, res)
 	copyResult := *res
 	copyResult.Output = append([]byte(nil), res.Output...)
 	out.TruncatedStart = copyResult.OutputTruncatedStart
@@ -494,6 +488,18 @@ func (d *dispatcher) audit(kind, detail string) {
 	if d.aw != nil {
 		_, _ = d.aw.Append(audit.Record{Board: d.board, Session: d.coord.SessionID(), Kind: kind, Detail: detail})
 	}
+}
+
+// finalizeResult records the terminal audit line for a transaction this
+// dispatcher waited on itself. It goes through the open set's finalize
+// claim so that the concurrent reconciler can never produce a second
+// "result" record for the same transaction.
+func (d *dispatcher) finalizeResult(txID string, res *command.Result) {
+	if d.open != nil {
+		_, _ = d.open.finalize(d.aw, d.board, txID, resultDetail(txID, res))
+		return
+	}
+	d.audit("result", resultDetail(txID, res))
 }
 
 func (d *dispatcher) commandPropose(payload json.RawMessage) (any, *v1.ProtocolError) {
@@ -554,7 +560,7 @@ func (d *dispatcher) commandApprove(payload json.RawMessage) (any, *v1.ProtocolE
 	d.audit("approval", fmt.Sprintf("proposal=%s confirmation=[redacted] bytes=%d", p.ProposalID, len(p.Confirmation)))
 	d.audit("transaction", tx.ID)
 	if d.open != nil {
-		_ = d.open.add(tx.ID)
+		_ = d.open.add(tx.ID, tx.SessionID)
 	}
 	return tx, nil
 }
