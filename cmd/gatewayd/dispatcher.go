@@ -353,27 +353,29 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	if p.SessionID != d.coord.SessionID() {
 		return nil, badPayload(fmt.Errorf("session is not current"))
 	}
-	if !d.coord.AIEnabled() || d.coord.State() != session.Ready {
-		return nil, badPayload(gateway.ErrNotReady)
-	}
-	prop, err := d.coord.Propose(p.SessionID, p.Text, p.Purpose, time.Duration(p.TimeoutMS)*time.Millisecond)
+	tx, err := d.coord.DiagnoseStart(p.SessionID, p.Text, p.Purpose, time.Duration(p.TimeoutMS)*time.Millisecond)
 	if err != nil {
-		return nil, badPayload(err)
+		// A write failure happens after approval and returns its transaction so
+		// the terminal result can still be audited and removed from the open set.
+		if tx == nil {
+			return nil, badPayload(err)
+		}
 	}
-	d.audit("proposal", prop.ID)
-	d.audit("auto-readonly-approval", prop.ID)
-	tx, err := d.coord.Approve(prop.ID)
-	if err != nil {
-		return nil, badPayload(err)
+	d.audit("proposal", tx.SourceProposalID)
+	if err == nil {
+		d.audit("auto-readonly-approval", tx.SourceProposalID)
 	}
 	out.Transaction = tx
 	d.audit("transaction", tx.ID)
 	if d.open != nil {
 		_ = d.open.add(tx.ID)
 	}
-	res, err := d.coord.WaitResult(context.Background(), tx.ID)
-	if err != nil {
-		return nil, internalErr(err)
+	res, waitErr := d.coord.WaitResult(context.Background(), tx.ID)
+	if waitErr != nil {
+		return nil, internalErr(waitErr)
+	}
+	if err != nil && res == nil {
+		return nil, badPayload(err)
 	}
 	if d.open != nil {
 		_ = d.open.remove(tx.ID)
@@ -381,9 +383,7 @@ func (d *dispatcher) diagnoseExecute(payload json.RawMessage) (any, *v1.Protocol
 	d.audit("result", fmt.Sprintf("transaction=%s status=%s", tx.ID, res.Status))
 	copyResult := *res
 	copyResult.Output = append([]byte(nil), res.Output...)
-	if len(copyResult.Output) >= 1<<20 {
-		out.TruncatedStart = true
-	}
+	out.TruncatedStart = copyResult.OutputTruncatedStart
 	if len(copyResult.Output) > diagnosticOutputLimit {
 		copyResult.Output = copyResult.Output[:diagnosticOutputLimit]
 		out.TruncatedEnd = true

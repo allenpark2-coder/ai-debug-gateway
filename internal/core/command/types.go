@@ -75,6 +75,9 @@ type Result struct {
 	Duration time.Duration
 	// Output is the combined console output for the execution interval.
 	Output []byte
+	// OutputTruncatedStart reports that the transcript ring had already
+	// overwritten the beginning of this transaction's output.
+	OutputTruncatedStart bool
 	// ContextBefore and ContextAfter are bounded transcript context
 	// surrounding execution, filled in by the coordinator.
 	ContextBefore []byte

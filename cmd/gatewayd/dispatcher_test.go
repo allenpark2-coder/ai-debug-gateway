@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -31,8 +33,9 @@ type fakeCoordStream struct {
 	closeCh  chan struct{}
 	closeOne sync.Once
 
-	writeMu sync.Mutex
-	written bytes.Buffer
+	writeMu  sync.Mutex
+	written  bytes.Buffer
+	writeErr error
 }
 
 func TestDiagnoseRejectsWithoutProposalOrWrite(t *testing.T) {
@@ -95,6 +98,18 @@ func TestDiagnoseExecutesAndReturnsOnlyTransactionOutput(t *testing.T) {
 		if bytes.Contains(got.Result.Output, []byte("old-output")) {
 			t.Fatal("result included pre-transaction output")
 		}
+		records, err := d.aw.ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var kinds []string
+		for _, rec := range records {
+			kinds = append(kinds, rec.Kind)
+		}
+		want := []string{"proposal", "auto-readonly-approval", "transaction", "result"}
+		if fmt.Sprint(kinds) != fmt.Sprint(want) {
+			t.Fatalf("audit kinds = %v, want %v", kinds, want)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("diagnose did not finish")
 	}
@@ -136,6 +151,40 @@ func TestConcurrentDiagnoseReturnsBusy(t *testing.T) {
 	}
 }
 
+func TestDiagnoseWriteFailureReturnsTerminalResultAndConsistentAudit(t *testing.T) {
+	d := newTestDispatcher(t)
+	d.policy = policy.Common()
+	stream := newFakeCoordStream()
+	stream.writeErr = errors.New("write failed")
+	if err := d.coord.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, protoErr := d.Dispatch(ipc.RoleDiagnose, v1.Request{Operation: v1.OpDiagnoseExecute, Payload: mustJSON(t,
+		diagnoseExecutePayload{SessionID: d.coord.SessionID(), Text: "uname -a", TimeoutMS: 1000})})
+	if protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	got := raw.(diagnoseExecuteResult)
+	if got.Result == nil || got.Result.Status != command.StatusDisconnected {
+		t.Fatalf("result = %+v", got.Result)
+	}
+	if len(d.open.list()) != 0 {
+		t.Fatalf("open set = %v", d.open.list())
+	}
+	records, err := d.aw.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, rec := range records {
+		kinds = append(kinds, rec.Kind)
+	}
+	want := []string{"proposal", "transaction", "result"}
+	if fmt.Sprint(kinds) != fmt.Sprint(want) {
+		t.Fatalf("audit kinds = %v, want %v", kinds, want)
+	}
+}
+
 func newFakeCoordStream() *fakeCoordStream {
 	return &fakeCoordStream{
 		identity: transport.Identity{Kind: "usb-serial-by-id", Key: "/dev/serial/by-id/usb-x"},
@@ -159,6 +208,9 @@ func (f *fakeCoordStream) Read(p []byte) (int, error) {
 func (f *fakeCoordStream) Write(p []byte) (int, error) {
 	f.writeMu.Lock()
 	defer f.writeMu.Unlock()
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
 	return f.written.Write(p)
 }
 
