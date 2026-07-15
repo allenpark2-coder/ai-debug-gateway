@@ -55,9 +55,36 @@ func TestSaveRejectsInvalidLineSettings(t *testing.T) {
 	}
 }
 
+func TestSSHConfigSaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := Profile{
+		Name: "board-c",
+		SSH: &SSHConfig{
+			Host:           "board.example",
+			Port:           22,
+			User:           "root",
+			IdentityFiles:  []string{"/home/op/.ssh/id_ed25519"},
+			UseAgent:       true,
+			KnownHostsFile: "/home/op/.config/ai-debug-gateway/known_hosts",
+		},
+	}
+	if err := Save(dir, p); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(dir, "board-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(p, got) {
+		t.Fatalf("got %+v, want %+v", got, p)
+	}
+}
+
 func TestProfileTypeHasNoSecretFields(t *testing.T) {
 	assertNoSecretFields(t, reflect.TypeOf(Profile{}))
 	assertNoSecretFields(t, reflect.TypeOf(UARTConfig{}))
+	assertNoSecretFields(t, reflect.TypeOf(SSHConfig{}))
 }
 
 func assertNoSecretFields(t *testing.T, typ reflect.Type) {

@@ -1,6 +1,6 @@
 // Package profile persists board profiles: UART line settings and a
-// stable USB identity. Profiles never store passwords or private-key
-// passphrases; SSH configuration is added in a later phase.
+// stable USB identity, and/or SSH host/user/key configuration.
+// Profiles never store passwords or private-key passphrases.
 package profile
 
 import (
@@ -18,10 +18,27 @@ type UARTConfig struct {
 	Line     serial.LineSettings
 }
 
-// Profile is one board's saved configuration.
+// SSHConfig is a profile's persistent SSH configuration. It never
+// stores a password or private-key passphrase; those are entered
+// interactively for each connection attempt.
+type SSHConfig struct {
+	Host          string
+	Port          int
+	User          string
+	IdentityFiles []string
+	UseAgent      bool
+	// KnownHostsFile is the path host-key verification reads from and
+	// (on human acceptance of a new host) appends to.
+	KnownHostsFile string
+}
+
+// Profile is one board's saved configuration. A board profile may
+// hold both UART and SSH configuration; starting a session still
+// requires the caller to pick exactly one transport.
 type Profile struct {
 	Name string
 	UART *UARTConfig
+	SSH  *SSHConfig
 }
 
 // Save validates p and atomically writes it as 0600 JSON to
