@@ -147,6 +147,9 @@ func runCommandLine(client *Client, line string, out io.Writer) (endLoop bool, e
 	case "retry uart":
 		_, err := client.RetryUART()
 		return false, err
+	case "retry ssh":
+		_, err := client.RetrySSH()
+		return false, err
 	case "takeover":
 		_, err := client.Takeover()
 		return false, err

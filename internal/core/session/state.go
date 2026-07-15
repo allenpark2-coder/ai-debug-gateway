@@ -29,6 +29,9 @@ const (
 
 const (
 	// Connect is a human request to start a session from DISCONNECTED.
+	// It rotates the session ID: every genuinely new session, whether
+	// the first one ever or one started after an explicit end (for
+	// example to switch transport), gets a fresh identifier.
 	Connect Event = "CONNECT"
 	// TransportReady reports that the transport is open and readable.
 	TransportReady Event = "TRANSPORT_READY"
@@ -71,7 +74,7 @@ type transition struct {
 
 var table = map[State]map[Event]transition{
 	Disconnected: {
-		Connect: {to: Connecting},
+		Connect: {to: Connecting, rotatesID: true},
 	},
 	Connecting: {
 		TransportReady: {to: Authenticating},

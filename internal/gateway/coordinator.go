@@ -88,11 +88,17 @@ type Coordinator struct {
 	ring     *transcript.Ring
 	secretW  *secret.Window
 
-	stream       transport.Stream
-	loginCfg     LoginConfig
-	opener       Opener
-	usernameSent bool
-	manualReady  bool
+	stream        transport.Stream
+	transportKind string // "uart" or "ssh"
+	loginCfg      LoginConfig
+	opener        Opener
+	usernameSent  bool
+	manualReady   bool
+	// readerDone is closed when the current transport's reader
+	// goroutine fully exits, so EndSession can wait on exactly that
+	// goroutine (not the coordinator's whole lifetime, which
+	// timeoutLoop holds open) before returning.
+	readerDone chan struct{}
 
 	humanSubs []*subscriber
 	aiSubs    []*subscriber
@@ -131,35 +137,65 @@ func (c *Coordinator) Stop() {
 	c.wg.Wait()
 }
 
-// StartUART begins a session on an already-opened UART stream. opener
-// is used by a later RetryUART to safely reopen the same physical
-// device; it may be nil if the caller does not support retry.
-func (c *Coordinator) StartUART(stream transport.Stream, cfg LoginConfig, opener Opener) error {
+// start begins a session on an already-opened stream, shared by
+// StartUART and StartSSH: only the Opener (for a later retry), login
+// config (UART-only; SSH has none), transport kind, and whether the
+// transport's own handshake already completed authentication before
+// the stream existed (true for SSH, false for UART, whose login
+// happens over the stream itself) differ between the two transports.
+func (c *Coordinator) start(stream transport.Stream, cfg LoginConfig, opener Opener, kind string, alreadyAuthenticated bool) error {
 	c.mu.Lock()
 	if c.stream != nil {
 		c.mu.Unlock()
 		return ErrTransportActive
 	}
+	if c.sess.State() == session.Reconnecting {
+		// A prior transport loss left the session dangling in
+		// RECONNECTING with no explicit EndSession or Retry* yet:
+		// Connect is only valid from DISCONNECTED, so starting fresh
+		// here abandons that reconnect lineage instead of silently
+		// failing to reach CONNECTING at all.
+		_ = c.sess.Apply(session.Shutdown)
+	}
 	c.stream = stream
+	c.transportKind = kind
 	c.loginCfg = cfg
 	c.opener = opener
 	c.usernameSent = false
 	c.manualReady = false
 	_ = c.sess.Apply(session.Connect)
 	_ = c.sess.Apply(session.TransportReady)
+	if alreadyAuthenticated {
+		_ = c.sess.Apply(session.Authenticated)
+	}
+	done := make(chan struct{})
+	c.readerDone = done
 	c.mu.Unlock()
 
 	c.wg.Add(1)
-	go c.readLoop(stream)
+	go c.readLoop(stream, done)
 	return nil
 }
 
-// RetryUART is the human-approved retry for a RECONNECTING UART
-// session. It requires the Opener supplied to StartUART to resolve the
-// device's identity; a nil Opener or one that cannot safely resolve
-// the identity yields ErrHumanSelectionRequired, and the session ID is
-// left unchanged.
-func (c *Coordinator) RetryUART() error {
+// StartUART begins a session on an already-opened UART stream. opener
+// is used by a later RetryUART to safely reopen the same physical
+// device; it may be nil if the caller does not support retry.
+func (c *Coordinator) StartUART(stream transport.Stream, cfg LoginConfig, opener Opener) error {
+	return c.start(stream, cfg, opener, "uart", false)
+}
+
+// StartSSH begins a session on an already-opened, already-authenticated
+// SSH stream (the SSH handshake completes authentication before Open
+// ever returns a stream, so there is no UART-style login prompt to
+// wait for). opener is used by a later RetrySSH to reconnect.
+func (c *Coordinator) StartSSH(stream transport.Stream, opener Opener) error {
+	return c.start(stream, LoginConfig{}, opener, "ssh", true)
+}
+
+// retry is the shared human-approved-retry mechanism for RetryUART and
+// RetrySSH: only whether the transport's handshake already completed
+// authentication before the new stream existed differs.
+func (c *Coordinator) retry(alreadyAuthenticated bool) error {
 	c.mu.Lock()
 	if c.sess.State() != session.Reconnecting {
 		c.mu.Unlock()
@@ -187,18 +223,40 @@ func (c *Coordinator) RetryUART() error {
 	c.usernameSent = false
 	c.manualReady = false
 	_ = c.sess.Apply(session.TransportReady)
+	if alreadyAuthenticated {
+		_ = c.sess.Apply(session.Authenticated)
+	}
+	done := make(chan struct{})
+	c.readerDone = done
 	c.mu.Unlock()
 
 	c.wg.Add(1)
-	go c.readLoop(newStream)
+	go c.readLoop(newStream, done)
 	return nil
 }
 
+// RetryUART is the human-approved retry for a RECONNECTING UART
+// session. It requires the Opener supplied to StartUART to resolve the
+// device's identity; a nil Opener or one that cannot safely resolve
+// the identity yields ErrHumanSelectionRequired, and the session ID is
+// left unchanged.
+func (c *Coordinator) RetryUART() error { return c.retry(false) }
+
+// RetrySSH is the human-approved retry for a RECONNECTING SSH session.
+// Like RetryUART, it requires the Opener supplied to StartSSH; a
+// failed retry leaves the session ID unchanged. A successful one
+// rotates the session ID and always loses prior shell state (a new
+// SSH connection is a new shell), since a retry is never a resume.
+func (c *Coordinator) RetrySSH() error { return c.retry(true) }
+
 // Propose creates a new pending proposal.
 func (c *Coordinator) Propose(sessionID, text, purpose string, timeout time.Duration) (*command.Proposal, error) {
+	c.mu.Lock()
+	kind := c.transportKind
+	c.mu.Unlock()
 	return c.commands.Propose(command.Input{
 		SessionID: sessionID,
-		Transport: "uart",
+		Transport: kind,
 		Board:     c.board,
 		Text:      text,
 		Purpose:   purpose,
@@ -316,18 +374,38 @@ func (c *Coordinator) PendingForSession(sessionID string) []*command.Proposal {
 	return c.commands.PendingForSession(sessionID)
 }
 
-// Disconnect closes the active transport, if any, without stopping the
-// coordinator itself. The reader goroutine's own error handling then
-// moves the session to RECONNECTING exactly as a real transport loss
-// would, so a later StartUART/RetryUART can begin a fresh session.
-func (c *Coordinator) Disconnect() error {
+// EndSession closes the active transport, if any, without stopping the
+// coordinator itself, and waits for that transport's reader goroutine
+// to fully exit before returning -- so by the time EndSession returns,
+// c.stream is guaranteed nil and a subsequent StartUART/StartSSH for
+// the same board can proceed immediately, including switching
+// transport. The reader goroutine's own error handling already moves
+// the session to RECONNECTING and invalidates pending proposals
+// exactly as a real transport loss would; EndSession additionally
+// finishes that lineage off to DISCONNECTED, so the next Start*'s
+// Connect (only valid from DISCONNECTED) mints a genuinely new session
+// ID rather than attempting to resume this one, per "changing
+// transport explicitly ends the old session ... and creates a new
+// session identifier."
+func (c *Coordinator) EndSession() error {
 	c.mu.Lock()
 	stream := c.stream
+	done := c.readerDone
 	c.mu.Unlock()
 	if stream == nil {
 		return ErrNotConnected
 	}
-	return stream.Close()
+	if err := stream.Close(); err != nil {
+		return err
+	}
+	if done != nil {
+		<-done
+	}
+
+	c.mu.Lock()
+	_ = c.sess.Apply(session.Shutdown)
+	c.mu.Unlock()
+	return nil
 }
 
 // WriteHuman forwards raw human keystrokes straight to the transport.
@@ -424,8 +502,9 @@ func (c *Coordinator) activeMarker() marker {
 // hands the chunk to onData for prompt/marker matching: all bounded,
 // in-memory work, so it never waits on AI processing, approval, a slow
 // client, or durable log I/O.
-func (c *Coordinator) readLoop(stream transport.Stream) {
+func (c *Coordinator) readLoop(stream transport.Stream, done chan struct{}) {
 	defer c.wg.Done()
+	defer close(done)
 	buf := make([]byte, 4096)
 	for {
 		n, err := stream.Read(buf)

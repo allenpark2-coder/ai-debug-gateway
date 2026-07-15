@@ -105,6 +105,18 @@ func TestRunCommandLineRetryUARTAndTakeover(t *testing.T) {
 	}
 }
 
+func TestRunCommandLineRetrySSH(t *testing.T) {
+	c, d := newRecordingClient(t)
+	var out bytes.Buffer
+
+	if _, err := runCommandLine(c, "retry ssh", &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.ops) != 1 || d.ops[0] != v1.OpRetrySSH {
+		t.Fatalf("got %+v", d.ops)
+	}
+}
+
 func TestRunCommandLineDetachEndsLoopWithoutEndingSession(t *testing.T) {
 	c, d := newRecordingClient(t)
 	var out bytes.Buffer

@@ -150,6 +150,14 @@ func (c *Client) RetryUART() (json.RawMessage, error) {
 	return out, err
 }
 
+// RetrySSH is the human-approved SSH reconnect (attach connections
+// only).
+func (c *Client) RetrySSH() (json.RawMessage, error) {
+	var out json.RawMessage
+	err := c.Call(v1.OpRetrySSH, nil, &out)
+	return out, err
+}
+
 // Takeover ends the active transaction as interrupted-by-user and
 // restores manual control (attach connections only).
 func (c *Client) Takeover() (json.RawMessage, error) {

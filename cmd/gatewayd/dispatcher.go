@@ -108,6 +108,8 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 		return d.transportWrite(req.Payload)
 	case v1.OpRetryUART:
 		return d.retryUART()
+	case v1.OpRetrySSH:
+		return d.retrySSH()
 	case v1.OpTakeover:
 		return d.takeover()
 	case v1.OpSecretBegin:
@@ -179,7 +181,7 @@ func (d *dispatcher) sessionStatus() (any, *v1.ProtocolError) {
 }
 
 func (d *dispatcher) sessionEnd() (any, *v1.ProtocolError) {
-	if err := d.coord.Disconnect(); err != nil {
+	if err := d.coord.EndSession(); err != nil {
 		return nil, internalErr(err)
 	}
 	return map[string]string{"state": string(d.coord.State())}, nil
@@ -348,6 +350,13 @@ func (d *dispatcher) secretDone() (any, *v1.ProtocolError) {
 
 func (d *dispatcher) retryUART() (any, *v1.ProtocolError) {
 	if err := d.coord.RetryUART(); err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) retrySSH() (any, *v1.ProtocolError) {
+	if err := d.coord.RetrySSH(); err != nil {
 		return nil, internalErr(err)
 	}
 	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil

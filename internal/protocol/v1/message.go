@@ -34,6 +34,7 @@ const (
 	OpSecretDone     = "secret.done"
 	OpTransportWrite = "transport.write"
 	OpRetryUART      = "retry.uart"
+	OpRetrySSH       = "retry.ssh"
 	OpTakeover       = "takeover"
 	OpHostKeyAccept  = "hostkey.accept"
 )
