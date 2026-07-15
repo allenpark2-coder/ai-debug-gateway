@@ -1,0 +1,114 @@
+Code Review: Phase 1/2/3 Implementation Plans
+================================================
+(2026-07-15-ai-debug-gateway-phase1-uart.md / phase2-ssh.md / phase3-hardening.md)
+對照的 spec: docs/superpowers/specs/2026-07-15-ai-debug-gateway-design.md
+(已含前兩輪 review 修好的所有項目，含 UART transport-loss/reboot 區分、
+proposal/transaction/result 生命週期、marker shell 合法性檢查、
+daemon-restarted、ad hoc secret redaction)
+
+總體印象
+--------
+
+三份計畫把 spec 裡辛苦定案的每一個細節都確實轉譯成了測試案例，執行順序
+也是紮實的 TDD(每個 task 都是「寫失敗測試 → 確認 red → 實作 → 驗證 →
+commit」)。以下先列跨三份計畫的問題，再列各別的小觀察。
+
+跨階段問題
+----------
+
+1. [中高，建議補上] 沒有任何 task/test 驗證「一個 board session 同時
+   只能用一種 transport」與「切換 transport 會讓舊 session 失效」
+
+   Spec 在「Board profiles and transport selection」明講：
+     - 「Starting a debug session requires selecting exactly one
+       transport.」
+     - 「cannot open UART and SSH simultaneously for the same session」
+     - 「Changing transport explicitly ends the old session, invalidates
+       its pending proposals, and creates a new session identifier.」
+   而且這條也被明列在 spec 的 Non-goals：「Simultaneously controlling one
+   board through UART and SSH」。
+
+   但翻遍 Phase 1、Phase 2、Phase 3 三份計畫：
+     - Phase 1 Task 1 的 session state 測試只涵蓋單一 transport 內部的
+       狀態轉換(connect/auth/reboot/loss/retry)，沒有「同一個 board
+       profile 換 transport」的案例。
+     - Phase 2 專注在新增 SSH 能力本身(auth、host-key、PTY、reconnect)，
+       Task 3、Task 4 都沒有測「已有 UART session 時嘗試開 SSH session
+       會被拒絕」或「從 UART 換成 SSH 會讓舊 proposal 失效、產生新
+       session ID」這個情境。
+     - Phase 3 Task 2(fault injection)、Task 4(硬體驗收 checklist)也
+       都沒有對應的列項。
+
+   這是唯一一個「兩個 transport 都已經存在之後才測得出來」的行為，自然的
+   位置應該在 Phase 2(SSH 加進來之後)，建議在 Phase 2 Task 3 或 Task 4
+   補一個測試案例：對同一個 board profile，UART session 進行中時嘗試
+   `StartSSH` 應該被拒絕；呼叫「切換 transport」後，舊 session 的
+   pending proposal 失效、產生新 session ID。並在 Phase 3 的硬體驗收
+   checklist 加一列。
+
+各階段的小觀察
+--------------
+
+Phase 1(UART)
+
+2. [輕微] Task 5 Step 2 的 reboot 測試只驗證「有設定 boot-banner pattern
+   且被偵測到 → target-rebooted」這條路徑，沒有明確測 spec 裡的另一半
+   規則：「A configured boot-banner pattern establishes the reboot event;
+   without such evidence an unfinished transaction follows its normal
+   timeout rule.」——也就是「沒設定 pattern，或輸出沒被辨識成 reboot」時，
+   進行中的 transaction 應該照常走 timeout，**不能**被誤判成
+   target-rebooted。建議在同一個 Step 加一個反向測試案例，避免實作時
+   把「看起來像重開機的輸出」都直接歸類成 target-rebooted。
+
+3. [輕微] Task 2 Step 5「Implement expiry, replacement edit, atomic
+   single-use approval, advisory interactive-command warnings, result
+   duration/context, statuses, and invalidation.」裡的「statuses」只是
+   籠統帶過，沒有像其他地方一樣把 spec 定義的完整 7 種狀態(`completed`,
+   `timeout`, `disconnected`, `interrupted-by-user`, `protocol-error`,
+   `target-rebooted`, `daemon-restarted`)列出來。風險不高(spec 本身是
+   權威來源)，但既然這份計畫其他地方都寫得很精確，這裡可以順手補齊避免
+   漏掉 `target-rebooted`/`daemon-restarted` 兩個較新加入的狀態。
+
+Phase 2(SSH)
+
+4. [無新增問題] Host-key 矩陣測試(Task 2 Step 1)直接對應 spec 的
+   「a host-key change cannot be approved through the AI interface」，
+   覆蓋得很到位(unknown 需要 human token、AI token 失敗、
+   changed/revoked 無法被 accept)。Reconnect 測試(Task 3)明確驗證
+   「never reconnects on network recovery alone」與 session ID 更新、
+   指令不重播，跟 spec 一致。除了跨階段問題 #1，這份計畫本身沒有發現
+   其他缺口。
+
+Phase 3(Hardening)
+
+5. [無新增問題，值得稱讚] Task 2 的 fault injection 對「daemon 在
+   proposal/approval/command write/partial marker/full marker 各階段
+   被 kill」都各自測了一次，直接對應 spec 的
+   「Daemon restart or crash invalidates every pending proposal and
+   marks every approved or running transaction as daemon-restarted」，
+   而且用 `-count=10` 抓不穩定的競態，這是很扎實的驗證方式。
+
+6. [備註，非缺陷] 依賴版本號(`go.bug.st/serial@v1.7.1`、
+   `golang.org/x/term@v0.40.0`、`golang.org/x/crypto@v0.48.0`)與
+   Go 工具鏈(1.25 語言基準/1.26.5 工具鏈)都是釘死的具體版本號，無法在
+   這次 review 裡驗證這些版本號在動工當下是否真的存在/是最新版。建議
+   實作 Task 1 Step 1(各階段的「Pin dependency」步驟)時，先跑
+   `go get` 確認版本存在，版本不對就照當下實際最新版調整，不影響計畫
+   本身的正確性。
+
+總結／是否可以開始實作
+----------------------
+
+三份計畫對 spec 的翻譯非常精確，尤其是 managed-command 的 shell 合法性
+測試案例(`sleep 1 &` 拒絕、`cat <<EOF` 拒絕、多行拒絕)、UART
+transport-loss vs reboot 的區分、secret redaction window 的 echo
+抑制與 grace period，都是逐條對應 spec 裡最難的部分，看得出來是照 spec
+逐句核對著寫的。
+
+**建議：可以開始 Phase 1 實作**，Phase 1 內部沒有阻擋性問題。**在動手
+寫 Phase 2 之前，建議先把跨階段問題 #1(one-transport-per-session 的
+測試覆蓋)排進 Phase 2 的 task 列表**，因為這是 spec 明文要求、也列在
+Non-goals 裡的行為，現在三份計畫都沒測到，若拖到 Phase 3 才發現，屆時
+UART/SSH 的 coordinator 介面可能已經定型，補測試容易變成補洞而不是
+天然的驗收項目。第 2、3 點可以在對應 task 執行時順手補上，不影響整體
+時程。

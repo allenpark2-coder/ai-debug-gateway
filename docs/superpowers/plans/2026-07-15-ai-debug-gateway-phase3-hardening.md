@@ -75,7 +75,7 @@ fuzz-smoke:
 
 **Interfaces:** Human sign-off record; no code API.
 
-- [ ] **Step 1: Write checklist** — Record board/firmware/host/adapter/fingerprint/timestamps and pass/fail rows for UART manual/AI/reboot/login/unplug/mismatch/retry, SSH auth/host-key/disconnect/retry, takeover, and secret searches.
+- [ ] **Step 1: Write checklist** — Record board/firmware/host/adapter/fingerprint/timestamps and pass/fail rows for UART manual/AI/reboot/login/unplug/mismatch/retry, SSH auth/host-key/disconnect/retry, transport-switch exclusivity (UART active refuses SSH start; ending session then switching mints a new ID and drops old pending proposals), takeover, and secret searches.
 - [ ] **Step 2: Execute UART acceptance** — Run gates, complete all UART rows on ARM target, attach only redacted evidence.
-- [ ] **Step 3: Execute SSH acceptance** — Complete auth, deliberate controlled host-key replacement refusal, reboot/reconnect rows.
+- [ ] **Step 3: Execute SSH acceptance** — Complete auth, deliberate controlled host-key replacement refusal, reboot/reconnect rows, and the transport-switch exclusivity row against the same board profile used for UART acceptance.
 - [ ] **Step 4: Commit only real results** — Every required row is PASS; blockers remain FAIL, never silently skipped. Commit `docs: record 0.1.0 hardware acceptance`.

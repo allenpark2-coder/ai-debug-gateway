@@ -63,7 +63,19 @@ Request `xterm-256color`; merge stdout/stderr into ordered console events.
 **Interfaces:** Adds `Coordinator.StartSSH`, `RetrySSH`; human command `retry ssh`.
 
 - [ ] **Step 1: Write disconnect test** — EOF finalizes `disconnected`, invalidates proposals, enters reconnecting, and never reconnects on network recovery alone.
-- [ ] **Step 2: Write approved retry test**
+- [ ] **Step 2: Write transport-exclusivity test** — For one board profile: `StartUART` then `StartSSH` on the same board returns `ErrTransportActive` and opens no second connection; ending the UART session then `StartSSH` succeeds, mints a new session ID distinct from the ended UART session's, and leaves the old session's pending proposals invalidated.
+
+```go
+if err := c.StartUART(profile); err != nil { t.Fatal(err) }
+uartID := c.SessionID()
+if _, err := c.StartSSH(profile); !errors.Is(err, ErrTransportActive) { t.Fatal(err) }
+if err := c.EndSession(humanCapability); err != nil { t.Fatal(err) }
+if err := c.StartSSH(profile); err != nil { t.Fatal(err) }
+if c.SessionID() == uartID { t.Fatal("session ID reused across transport switch") }
+if len(store.PendingForSession(uartID)) != 0 { t.Fatal("old session proposals not invalidated") }
+```
+
+- [ ] **Step 3: Write approved retry test**
 
 ```go
 old := c.SessionID()
@@ -72,8 +84,8 @@ if c.SessionID() == old { t.Fatal("session ID reused") }
 if fakeServer.CommandCount() != 0 { t.Fatal("command replayed") }
 ```
 
-- [ ] **Step 3: Implement through common state events** — Keep only opener/auth callbacks transport-specific; bounded backoff applies only after a human retry request.
-- [ ] **Step 4: Verify both transports and commit** — Run `go test -race ./internal/gateway ./internal/cli ./internal/integration`; expect UART unchanged and SSH PASS. Commit `feat: integrate approved SSH reconnect`.
+- [ ] **Step 4: Implement through common state events** — Keep only opener/auth callbacks transport-specific; bounded backoff applies only after a human retry request; the coordinator tracks one active transport per board and rejects starting a second one until the active session ends.
+- [ ] **Step 5: Verify both transports and commit** — Run `go test -race ./internal/gateway ./internal/cli ./internal/integration`; expect UART unchanged and SSH PASS, including transport-exclusivity. Commit `feat: integrate approved SSH reconnect`.
 
 ### Task 4: SSH End-to-End Gate and Docs
 
