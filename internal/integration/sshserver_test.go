@@ -7,9 +7,11 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -208,11 +210,20 @@ func (s *sshTestServer) runShell(ch ssh.Channel, cwd *string) {
 }
 
 func (s *sshTestServer) respondToManagedCommand(ch ssh.Channel, cwd *string, cmdText, txn, nonce string) {
-	switch cmdText {
-	case "pwd":
+	switch {
+	case cmdText == "pwd":
 		fmt.Fprintf(ch, "%s\r\nGWMARK:%s:%s:0\r\n", *cwd, txn, nonce)
-	case "false":
+	case cmdText == "false":
 		fmt.Fprintf(ch, "GWMARK:%s:%s:1\r\n", txn, nonce)
+	case strings.HasPrefix(cmdText, "sleep "):
+		// Actually sleeps, unlike every other fake response here: tests
+		// that need a transaction to still be genuinely RUNNING (not
+		// yet completed) when they act need real wall-clock delay, not
+		// an instantly-answered stand-in.
+		if secs, err := strconv.ParseFloat(strings.TrimPrefix(cmdText, "sleep "), 64); err == nil {
+			time.Sleep(time.Duration(secs * float64(time.Second)))
+		}
+		fmt.Fprintf(ch, "GWMARK:%s:%s:0\r\n", txn, nonce)
 	default:
 		if strings.HasPrefix(cmdText, "cd ") {
 			*cwd = strings.TrimPrefix(cmdText, "cd ")

@@ -121,6 +121,10 @@ func run() error {
 	go runTranscriptDrain(coord, tw, board, drainStop)
 	defer close(drainStop)
 
+	reconcileStop := make(chan struct{})
+	go runOpenSetReconciler(coord, open, aw, reconcileStop)
+	defer close(reconcileStop)
+
 	controlSock := filepath.Join(d.Data, "gatewayd.control.sock")
 	attachSock := filepath.Join(d.Data, "gatewayd.attach.sock")
 

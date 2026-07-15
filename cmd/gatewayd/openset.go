@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
+	"github.com/allenpark2-coder/ai-debug-gateway/internal/gateway"
 )
 
 // openSet durably tracks transaction IDs that have been approved but
@@ -94,6 +96,52 @@ func (s *openSet) saveLocked() error {
 		return err
 	}
 	return os.Rename(tmpPath, s.path)
+}
+
+// openSetReconcileInterval bounds how long a transaction that finishes
+// normally (completed, timed out, disconnected, target-rebooted,
+// interrupted by the human) can remain in the open set before its real
+// result is durably recorded and it is cleared. Short enough that even
+// a crash shortly after completion still finalizes it correctly: a
+// restart only ever marks daemon-restarted whatever is still in the
+// open set, so anything this reconciler has already flushed out is
+// safe from being relabeled.
+const openSetReconcileInterval = 50 * time.Millisecond
+
+// runOpenSetReconciler periodically flushes every open transaction
+// that already has a result to the durable audit log and clears it
+// from open, so it stops being a daemon-restarted candidate the moment
+// its real outcome is known -- "preserve complete results" is a
+// property of this reconciler having run, not of recoverIncompleteTransactions
+// (which only ever sees whatever is still open at the next startup).
+func runOpenSetReconciler(coord *gateway.Coordinator, open *openSet, aw *audit.Writer, stop <-chan struct{}) {
+	ticker := time.NewTicker(openSetReconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			reconcileOpenTransactions(coord, open, aw)
+		}
+	}
+}
+
+func reconcileOpenTransactions(coord *gateway.Coordinator, open *openSet, aw *audit.Writer) {
+	for _, txID := range open.list() {
+		res, err := coord.Result(txID)
+		if err != nil {
+			continue // still running; no result recorded yet
+		}
+		detail := fmt.Sprintf("transaction=%s status=%s", txID, res.Status)
+		if res.ExitCode != nil {
+			detail += fmt.Sprintf(" exit_code=%d", *res.ExitCode)
+		}
+		if _, err := aw.Append(audit.Record{Kind: "result", Detail: detail}); err != nil {
+			continue // retry next tick rather than losing the ID's tracking
+		}
+		_ = open.remove(txID)
+	}
 }
 
 // recoverIncompleteTransactions finalizes every transaction ID still
