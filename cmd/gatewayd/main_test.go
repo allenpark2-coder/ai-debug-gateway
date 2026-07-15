@@ -9,6 +9,55 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/core/audit"
 )
 
+func TestParseDaemonOptions(t *testing.T) {
+	got, err := parseDaemonOptions([]string{"--auto-readonly"})
+	if err != nil || !got.AutoReadonly {
+		t.Fatalf("parseDaemonOptions() = %+v, %v", got, err)
+	}
+	if _, err := parseDaemonOptions([]string{"--unknown"}); err == nil {
+		t.Fatal("expected unknown argument to fail")
+	}
+}
+
+func TestLoadDaemonPolicyOnlyWhenAutoReadonlyIsEnabled(t *testing.T) {
+	config := t.TempDir()
+	policyDir := filepath.Join(config, "policies")
+	if err := os.Mkdir(policyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(policyDir, "board-1.json")
+	if err := os.WriteFile(name, []byte(`{"allow":[{"executable":"opsis-inspect","args":["status"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := loadDaemonPolicy(daemonOptions{}, config, "board-1")
+	if err != nil {
+		t.Fatalf("ordinary startup unexpectedly read policy: %v", err)
+	}
+	if p.Evaluate("opsis-inspect status").Allowed {
+		t.Fatal("ordinary startup unexpectedly applied board policy")
+	}
+
+	p, err = loadDaemonPolicy(daemonOptions{AutoReadonly: true}, config, "board-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Evaluate("opsis-inspect status").Allowed {
+		t.Fatal("auto-readonly did not apply board policy")
+	}
+
+	// Loading returns a snapshot; changing the file does not mutate the policy.
+	if err := os.WriteFile(name, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !p.Evaluate("opsis-inspect status").Allowed {
+		t.Fatal("policy was live reloaded")
+	}
+	if _, err := loadDaemonPolicy(daemonOptions{AutoReadonly: true}, config, "board-1"); err == nil || !strings.Contains(err.Error(), "board policy") {
+		t.Fatalf("invalid diagnose policy error = %v, want clear board policy error", err)
+	}
+}
+
 func TestAcquireLockRejectsSecondInstance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gatewayd.lock")
 
