@@ -75,13 +75,18 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 		}
 		return profileCreate(sockets.ProfileDir)
 	case "start":
+		// Per the design spec, passwords are entered only through an
+		// interactive terminal with echo disabled -- never argv, where
+		// they leak into process listings and shell history.
+		if hasFlag(args, "--ssh-password") {
+			return fmt.Errorf("--ssh-password is not supported: run start from an interactive terminal and enter the password at the hidden prompt")
+		}
 		board := flagValue(args, "--board")
 		opts := cli.SessionStartOptions{
 			Transport:     flagValue(args, "--transport"),
-			SSHPassword:   flagValue(args, "--ssh-password"),
 			SSHAcceptHost: hasFlag(args, "--ssh-accept-host"),
 		}
-		if opts.Transport == "ssh" && opts.SSHPassword == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+		if opts.Transport == "ssh" && term.IsTerminal(int(os.Stdin.Fd())) {
 			opts.SSHPassword = promptPassword("SSH password (leave blank to skip)")
 		}
 		// Dialed on the attach socket, not control: host-key
@@ -184,8 +189,9 @@ commands:
   version                                   print the build version and commit
   ports                                    list discovered serial ports
   profile create                           interactively create a board profile
-  start [--board NAME] [--transport uart|ssh] [--ssh-password PW] [--ssh-accept-host]
-                                            start a session
+  start [--board NAME] [--transport uart|ssh] [--ssh-accept-host]
+                                            start a session; an SSH password is
+                                            requested at a hidden interactive prompt
   status                                   report session state
   output --after N                         read console output after sequence N
   propose --session ID --text TEXT --purpose P --timeout-ms MS

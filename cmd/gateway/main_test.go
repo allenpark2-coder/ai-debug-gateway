@@ -156,6 +156,25 @@ func TestUnsafeShellValidatesRequiredFlagsBeforeDial(t *testing.T) {
 	}
 }
 
+// TestStartRejectsPasswordOnCommandLineBeforeDial enforces the spec
+// rule that passwords are entered only at a hidden interactive prompt:
+// argv would leak them into process listings and shell history.
+func TestStartRejectsPasswordOnCommandLineBeforeDial(t *testing.T) {
+	dials := 0
+	err := runCLI(
+		[]string{"start", "--transport", "ssh", "--ssh-password", "hunter2"},
+		socketPaths{},
+		func(string) (*cli.Client, error) { dials++; return nil, nil },
+		&bytes.Buffer{}, &bytes.Buffer{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "--ssh-password") {
+		t.Fatalf("err = %v, want a --ssh-password rejection", err)
+	}
+	if dials != 0 {
+		t.Fatalf("dials = %d, the rejection must happen before any dial", dials)
+	}
+}
+
 func TestApproveRoutesConfirmationToAttach(t *testing.T) {
 	d := &cliCaptureDispatcher{}
 	path := testCLIServer(t, ipc.RoleAttach, d)

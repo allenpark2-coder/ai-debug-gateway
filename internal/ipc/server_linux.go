@@ -99,6 +99,10 @@ type Server struct {
 	role     Role
 	dispatch Dispatcher
 	listener net.Listener
+	// path is the socket's final rename target; the listener only
+	// unlinks its original bind path on Close, so Close removes this
+	// one itself.
+	path string
 
 	closeOnce sync.Once
 	quit      chan struct{}
@@ -108,22 +112,31 @@ type Server struct {
 }
 
 // Listen creates (or replaces a stale) owner-only (0600) Unix domain
-// socket at path, serving role. The caller must call Serve exactly
-// once (typically as `go srv.Serve()`) for every successful Listen;
-// Close's Wait would otherwise block forever.
+// socket at path, serving role. The socket is bound at a temporary
+// name, made owner-only, and only then renamed into place, so path
+// never exists with wider permissions -- net.Listen initially creates
+// the socket with umask-derived permissions. The caller must call
+// Serve exactly once (typically as `go srv.Serve()`) for every
+// successful Listen; Close's Wait would otherwise block forever.
 func Listen(path string, role Role, dispatch Dispatcher) (*Server, error) {
-	_ = os.Remove(path) // a stale socket from a previous clean shutdown
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
 
-	l, err := net.Listen("unix", path)
+	l, err := net.Listen("unix", tmp)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		l.Close()
+		return nil, err
+	}
+	_ = os.Remove(path) // a stale socket from a previous clean shutdown
+	if err := os.Rename(tmp, path); err != nil {
 		l.Close()
 		return nil, err
 	}
 
-	s := &Server{role: role, dispatch: dispatch, listener: l, quit: make(chan struct{}), conns: make(map[net.Conn]struct{})}
+	s := &Server{role: role, dispatch: dispatch, listener: l, path: path, quit: make(chan struct{}), conns: make(map[net.Conn]struct{})}
 	// Added here, synchronously, before any goroutine exists to race a
 	// concurrent Close's Wait against; Serve balances this with Done.
 	s.wg.Add(1)
@@ -167,6 +180,7 @@ func (s *Server) Serve() error {
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() { close(s.quit) })
 	err := s.listener.Close()
+	_ = os.Remove(s.path)
 	s.connMu.Lock()
 	for conn := range s.conns {
 		_ = conn.Close()

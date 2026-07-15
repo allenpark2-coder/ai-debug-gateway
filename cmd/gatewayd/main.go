@@ -81,6 +81,11 @@ func loadDaemonPolicy(options daemonOptions, configDir, board string) (*policy.P
 		return base, nil
 	}
 	loaded, err := policy.LoadFile(filepath.Join(configDir, "policies", board+".json"), base)
+	// Board additions are optional per the design spec; a board with no
+	// policy file runs auto-readonly under the common policy alone.
+	if errors.Is(err, os.ErrNotExist) {
+		return base, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("board policy for %q: %w", board, err)
 	}
@@ -179,15 +184,20 @@ func run() error {
 	}
 	// Policies are deliberately loaded once during startup. The resulting
 	// snapshot is handed to diagnose functionality in the startup graph.
-	diagnosticPolicy, err := loadDaemonPolicy(options, d.Config, board)
-	if err != nil {
-		return err
+	// Per the design spec, an invalid board policy prevents the diagnose
+	// socket from starting but never prevents manual mode, so a load
+	// failure degrades instead of aborting startup.
+	diagnosticPolicy, diagnosticErr := loadDaemonPolicy(options, d.Config, board)
+	autoReadonly := options.AutoReadonly
+	if diagnosticErr != nil {
+		log.Printf("gatewayd: auto-readonly mode disabled: %v", diagnosticErr)
+		diagnosticPolicy = nil
+		autoReadonly = false
 	}
-	// Unlike diagnosticPolicy above, a load failure here does not abort
-	// startup: per the design (docs/superpowers/specs/2026-07-15-auto-
-	// shell-denylist-design.md), an invalid or risk-not-accepted board
-	// file disables only the unsafe-shell socket, never manual mode or
-	// --auto-readonly.
+	// Same degradation for unsafe-shell: per the design (docs/superpowers/
+	// specs/2026-07-15-auto-shell-denylist-design.md), an invalid or
+	// risk-not-accepted board file disables only the unsafe-shell socket,
+	// never manual mode or --auto-readonly.
 	unsafeShellPolicy, unsafeShellErr := loadUnsafeShellDaemonPolicy(options, d.Config)
 	unsafeShellEnabled := options.UnsafeAutoShell != ""
 	if unsafeShellErr != nil {
@@ -209,7 +219,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := recoverIncompleteTransactions(open, aw); err != nil {
+	if err := recoverIncompleteTransactions(open, aw, board); err != nil {
 		return err
 	}
 
@@ -230,13 +240,13 @@ func run() error {
 	defer close(drainStop)
 
 	reconcileStop := make(chan struct{})
-	go runOpenSetReconciler(coord, open, aw, reconcileStop)
+	go runOpenSetReconciler(coord, open, aw, board, reconcileStop)
 	defer close(reconcileStop)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
-	return serveDaemonSockets(d.Data, board, options.AutoReadonly, unsafeShellEnabled, disp, sig,
+	return serveDaemonSockets(d.Data, board, autoReadonly, unsafeShellEnabled, disp, sig,
 		func(path string, role ipc.Role, dispatch ipc.Dispatcher) (daemonServer, error) {
 			return ipc.Listen(path, role, dispatch)
 		}, log.Default())
