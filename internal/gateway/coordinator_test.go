@@ -140,6 +140,43 @@ func TestTimeoutInterruptsAndBlocksUntilPromptResynchronizes(t *testing.T) {
 	}
 }
 
+func TestSSHTimeoutRetryClearsResynchronizationGate(t *testing.T) {
+	c := newTestCoordinator(t)
+	first := newFakeStream(transport.Identity{Kind: "ssh", Key: "first"})
+	second := newFakeStream(transport.Identity{Kind: "ssh", Key: "second"})
+	if err := c.StartSSH(first, func() (transport.Stream, error) { return second, nil }); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := c.DiagnoseStart(c.SessionID(), "top -b", "processes", 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := c.WaitResult(context.Background(), tx.ID); err != nil || res.Status != command.StatusTimeout {
+		t.Fatalf("result=%+v err=%v", res, err)
+	}
+	waitFor(t, time.Second, func() bool { return c.State() == session.Reconnecting })
+	if err := c.RetrySSH(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DiagnoseStart(c.SessionID(), "uname", "kernel", time.Second); err != nil {
+		t.Fatalf("fresh SSH shell inherited resync gate: %v", err)
+	}
+}
+
+func TestFreshSessionDoesNotInheritResynchronizationGate(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.mu.Lock()
+	c.resyncPending = true
+	c.mu.Unlock()
+	stream := newFakeStream(transport.Identity{Kind: "ssh", Key: "fresh"})
+	if err := c.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DiagnoseStart(c.SessionID(), "uname", "kernel", time.Second); err != nil {
+		t.Fatalf("fresh start inherited resync gate: %v", err)
+	}
+}
+
 func TestExactRingCapacityIsNotStartTruncated(t *testing.T) {
 	c := newTestCoordinator(t)
 	stream := newFakeStream(transport.Identity{Kind: "ssh", Key: "x"})
