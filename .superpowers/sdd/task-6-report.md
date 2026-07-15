@@ -30,3 +30,39 @@
 - Rejected inputs are checked against the SSH server's received-command list, proving no PTY write rather than merely inspecting a policy response.
 - The real-binary suite directly verifies timeout and SSH disconnect. Existing real-PTY UART integration continues to verify `target-rebooted`; attempting to model a target boot banner over SSH would test behavior SSH intentionally classifies as a connection lifecycle rather than UART reboot detection.
 - No parent-checkout binaries or untracked `internal/integration/security_test.go` were touched.
+
+## Review remediation
+
+RED findings reproduced:
+
+- The original manual-approval test could pass after its polling deadline and
+  did not prove the approved text reached the PTY. It now fails on deadline,
+  requires the final command count, and matches the exact `echo mutation;
+  printf` managed-command prefix.
+- Reading the running daemon's `bytes.Buffer` while checking the canary produced
+  a race-detector failure. The subprocess capture now uses a synchronized
+  buffer.
+- A compiled-daemon UART test could not populate the hard-coded privileged
+  `/dev/serial/by-id`. Serial discovery now supports
+  `GATEWAYD_SERIAL_BY_ID_DIR` and includes valid identities from that private
+  directory; a serial-package test and the full compiled-binary UART test cover
+  this path.
+
+GREEN evidence:
+
+- The known authentication canary is also sent through `secret.begin` and a
+  deliberately echoing target shell. The target-received line proves the
+  canary traversed the secret path. Assertions inspect diagnose stdout and
+  stderr, synchronized daemon stdout/stderr, returned transaction output, and
+  exported transcript plus audit; none contains it.
+- `TestDiagnoseRealUARTBinariesReportTargetRebooted` builds both binaries,
+  starts a UART session over a real PTY, runs `gateway diagnose`, injects the
+  boot banner during its active transaction, and requires exact
+  `target-rebooted` with no exit code.
+- Focused review run: `GOCACHE=/tmp/ai-debug-gateway-go-cache go test -race
+  ./internal/integration -run Diagnose -v -count=1` passed all four tests in
+  7.635s.
+- Documentation now says auto-readonly is optional but its 0600 per-board file
+  is required when enabled (including an empty JSON extension), recommends
+  rather than claims enforcement of directory ownership, and refers to all
+  enabled sockets.

@@ -83,10 +83,11 @@ gateway diagnose --session SESSION_ID --text 'ps -ef' \
 
 The diagnose socket is absent by default. Common rules default-deny unknown
 vendor tools, substitutions/redirections, sensitive reads, and mutations
-before they reach the SSH PTY. Exact board additions live in
-`$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`; keep the directory
-owner-only and file mode `0600`, or startup fails. Extensions cannot override
-common denials.
+before they reach the SSH PTY. Auto-readonly is optional, but enabling it
+requires `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`, even when
+the file is only `{"allow":[],"deny":[]}`. The file must be mode `0600` or
+startup fails; an owner-only directory is recommended. Extensions cannot
+override common denials.
 
 Denied work stays in the manual proposal flow. Review it in `gateway attach`,
 or—only after explicit operator confirmation in chat—use `gateway approve

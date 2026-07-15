@@ -56,6 +56,7 @@ type fakeConsole struct {
 	slaveClosed atomic.Bool // slave closed (hangup or closeAll)
 	closeOnce   sync.Once
 	slaveOnce   sync.Once
+	rebootOn    atomic.Bool
 }
 
 func newFakeConsole(t *testing.T) *fakeConsole {
@@ -172,6 +173,11 @@ func (f *fakeConsole) handleCommandLine(line string) {
 		return
 	}
 	txn, nonce := m[1], m[2]
+	if f.rebootOn.Load() {
+		f.rebootOn.Store(false)
+		f.write("\r\nBooting Linux on physical CPU 0\r\n")
+		return
+	}
 
 	switch cmdText {
 	case "reboot":

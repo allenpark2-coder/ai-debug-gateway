@@ -21,7 +21,7 @@ owner-only permissions if missing:
 | Durable audit log | `$XDG_DATA_HOME/ai-debug-gateway/audit.jsonl` |
 | Open-transaction recovery state | `$XDG_DATA_HOME/ai-debug-gateway/open-transactions.json` |
 
-Both sockets are mode `0600`: only the owning user can connect. The
+All enabled sockets are mode `0600`: only the owning user can connect. The
 lock file ensures only one `gatewayd` instance runs against a given
 data directory; a second attempt fails immediately with a clear error
 instead of silently fighting over the same serial port.
@@ -45,9 +45,11 @@ gateway diagnose --session SESSION_ID --text 'dmesg' \
   --purpose 'inspect boot errors' --timeout-ms 15000
 ```
 
-Ordinary startup omits the diagnose socket. The optional board policy is
-loaded once, from `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`;
-its directory must be owner-only and the file mode `0600`. It may add exact
+Ordinary startup omits the diagnose socket. Auto-readonly is optional, but
+when enabled its board policy is required (an empty extension may be
+`{"allow":[],"deny":[]}`). It is loaded once from
+`$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`; the file must be mode
+`0600`, and an owner-only directory is recommended. It may add exact
 read-only vendor argv forms, but cannot override common denials. Unknown tools,
 substitutions, redirections, sensitive paths, and state changes are rejected
 before the UART is written.

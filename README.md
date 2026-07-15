@@ -50,10 +50,11 @@ gateway diagnose --session SESSION_ID --text 'ps -ef' \
 Without `--auto-readonly`, the diagnose socket does not exist and manual
 approval remains the default. The common policy denies substitutions,
 redirections, sensitive paths, mutators, and unknown vendor commands before
-any bytes reach the target. Optional exact board-specific read-only forms live
-in `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`; keep its directory
-owner-only and the file mode `0600`. Invalid permissions or content prevent
-auto-readonly startup.
+any bytes reach the target. When auto-readonly is enabled, a policy file is
+required at `$XDG_CONFIG_HOME/ai-debug-gateway/policies/<board>.json`, even if
+it contains only `{"allow":[],"deny":[]}`. The file must be mode `0600`;
+keeping its directory owner-only is also recommended. Invalid file permissions
+or content prevent auto-readonly startup.
 
 After explicit confirmation in chat, a local agent can approve one mutation:
 
