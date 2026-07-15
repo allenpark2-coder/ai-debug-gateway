@@ -353,7 +353,7 @@ func TestProposeApproveAndListRoundTrip(t *testing.T) {
 
 	approveResult, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{
 		Operation: v1.OpCommandApprove,
-		Payload:   mustJSON(t, commandApprovePayload{ProposalID: prop.ID, Confirmation: "operator confirmed in chat"}),
+		Payload:   mustJSON(t, commandApprovePayload{ProposalID: prop.ID, Confirmation: "secret-token\ncontrol"}),
 	})
 	if protoErr != nil {
 		t.Fatal(protoErr)
@@ -367,8 +367,36 @@ func TestProposeApproveAndListRoundTrip(t *testing.T) {
 		t.Fatalf("expected the open set to track the new transaction, got %+v", got)
 	}
 	records, err := d.aw.ReadAll()
-	if err != nil { t.Fatal(err) }
-	if len(records) != 2 || records[0].Kind != "approval" || !strings.Contains(records[0].Detail, prop.ID) || !strings.Contains(records[0].Detail, "operator confirmed in chat") || records[1].Kind != "transaction" {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Kind != "approval" || !strings.Contains(records[0].Detail, prop.ID) || !strings.Contains(records[0].Detail, "confirmation=[redacted] bytes=20") || strings.Contains(records[0].Detail, "secret-token") || strings.Contains(records[0].Detail, "control") || records[1].Kind != "transaction" {
+		t.Fatalf("audit records = %+v", records)
+	}
+}
+
+func TestApproveRejectsOversizedConfirmationBeforeApprovalOrAudit(t *testing.T) {
+	d := newTestDispatcher(t)
+	stream := newFakeCoordStream()
+	if err := d.coord.StartSSH(stream, nil); err != nil {
+		t.Fatal(err)
+	}
+	prop, err := d.coord.Propose(d.coord.SessionID(), "pwd", "cwd", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, protoErr := d.Dispatch(ipc.RoleAttach, v1.Request{Operation: v1.OpCommandApprove, Payload: mustJSON(t, commandApprovePayload{ProposalID: prop.ID, Confirmation: strings.Repeat("s", maxConfirmationBytes+1)})})
+	if protoErr == nil {
+		t.Fatal("oversized confirmation accepted")
+	}
+	if len(d.coord.PendingForSession(d.coord.SessionID())) != 1 {
+		t.Fatal("proposal was approved")
+	}
+	records, err := d.aw.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
 		t.Fatalf("audit records = %+v", records)
 	}
 }

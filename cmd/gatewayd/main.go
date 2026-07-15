@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,22 @@ type daemonServer interface {
 	Close() error
 }
 type daemonListenFunc func(string, ipc.Role, ipc.Dispatcher) (daemonServer, error)
+
+type listenerGroup []daemonServer
+
+func (g listenerGroup) Close() error {
+	errs := make(chan error, len(g))
+	for _, srv := range g {
+		go func() { errs <- srv.Close() }()
+	}
+	var joined []error
+	for range g {
+		if err := <-errs; err != nil {
+			joined = append(joined, err)
+		}
+	}
+	return errors.Join(joined...)
+}
 
 func parseDaemonOptions(args []string) (daemonOptions, error) {
 	var options daemonOptions
@@ -186,7 +203,7 @@ func run() error {
 		}, log.Default())
 }
 
-func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) error {
+func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, stop <-chan os.Signal, listen daemonListenFunc, logger *log.Logger) (retErr error) {
 	diagnosePath := filepath.Join(dataDir, "gatewayd.diagnose.sock")
 	if !autoReadonly {
 		if err := os.Remove(diagnosePath); err != nil && !os.IsNotExist(err) {
@@ -201,12 +218,8 @@ func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, 
 	if autoReadonly {
 		specs = append(specs, listenerSpec{"diagnose", diagnosePath, ipc.RoleDiagnose})
 	}
-	servers := make([]daemonServer, 0, len(specs))
-	defer func() {
-		for _, srv := range servers {
-			_ = srv.Close()
-		}
-	}()
+	servers := make(listenerGroup, 0, len(specs))
+	defer func() { retErr = errors.Join(retErr, servers.Close()) }()
 	for _, spec := range specs {
 		srv, err := listen(spec.path, spec.role, disp)
 		if err != nil {
@@ -223,9 +236,11 @@ func serveDaemonSockets(dataDir string, autoReadonly bool, disp ipc.Dispatcher, 
 	for i, srv := range servers {
 		name := specs[i].name
 		go func() {
-			if err := srv.Serve(); err != nil {
-				errs <- fmt.Errorf("%s listener stopped: %w", name, err)
+			err := srv.Serve()
+			if err == nil {
+				err = errors.New("Serve returned unexpectedly")
 			}
+			errs <- fmt.Errorf("%s listener stopped: %w", name, err)
 		}()
 	}
 	select {

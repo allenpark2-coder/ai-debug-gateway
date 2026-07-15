@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +13,10 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/ipc"
 	v1 "github.com/allenpark2-coder/ai-debug-gateway/internal/protocol/v1"
 )
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("display failed") }
 
 type cliCaptureDispatcher struct{ requests []v1.Request }
 
@@ -69,6 +75,25 @@ func TestDiagnoseValidatesRequiredFlagsBeforeDial(t *testing.T) {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			dials := 0
 			err := runCLI(args, socketPaths{}, func(string) (*cli.Client, error) { dials++; return nil, nil }, &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || dials != 0 {
+				t.Fatalf("err=%v dials=%d", err, dials)
+			}
+		})
+	}
+}
+
+func TestDiagnoseRejectsOversizedConfirmationAndDisplayErrorsBeforeDial(t *testing.T) {
+	for name, args := range map[string][]string{
+		"oversized approval": {"approve", "--proposal", "p1", "--confirmation", strings.Repeat("x", maxConfirmationBytes+1)},
+		"display failure":    {"diagnose", "--session", "s", "--text", "ps", "--purpose", "list", "--timeout-ms", "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dials := 0
+			stderr := io.Writer(&bytes.Buffer{})
+			if name == "display failure" {
+				stderr = failingWriter{}
+			}
+			err := runCLI(args, socketPaths{}, func(string) (*cli.Client, error) { dials++; return nil, nil }, &bytes.Buffer{}, stderr)
 			if err == nil || dials != 0 {
 				t.Fatalf("err=%v dials=%d", err, dials)
 			}

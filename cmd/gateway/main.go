@@ -45,6 +45,8 @@ func main() {
 type socketPaths struct{ Control, Attach, Diagnose, ProfileDir string }
 type clientDialer func(string) (*cli.Client, error)
 
+const maxConfirmationBytes = 4 * 1024
+
 func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stderr io.Writer) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("command is required")
@@ -100,7 +102,9 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 		if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.Text) == "" || strings.TrimSpace(req.Purpose) == "" || req.TimeoutMS <= 0 {
 			return fmt.Errorf("diagnose requires nonempty --session, --text, --purpose, and positive --timeout-ms")
 		}
-		fmt.Fprintln(stderr, req.Text)
+		if _, err := fmt.Fprintln(stderr, req.Text); err != nil {
+			return fmt.Errorf("display diagnostic command: %w", err)
+		}
 		return runClient(sockets.Diagnose, dial, func(c *cli.Client) error {
 			result, err := c.DiagnoseExecute(req)
 			if err != nil {
@@ -117,6 +121,9 @@ func runCLI(argv []string, sockets socketPaths, dial clientDialer, stdout, stder
 		proposal, confirmation := flagValue(args, "--proposal"), flagValue(args, "--confirmation")
 		if strings.TrimSpace(proposal) == "" || strings.TrimSpace(confirmation) == "" {
 			return fmt.Errorf("approve requires nonempty --proposal and --confirmation")
+		}
+		if len(confirmation) > maxConfirmationBytes {
+			return fmt.Errorf("confirmation exceeds %d bytes", maxConfirmationBytes)
 		}
 		return runClient(sockets.Attach, dial, func(c *cli.Client) error {
 			data, err := c.CommandApproveWithConfirmation(proposal, confirmation)
