@@ -90,6 +90,9 @@ func TestDiagnoseStartWriteFailureRecordsAndWakes(t *testing.T) {
 	if res.Status != command.StatusDisconnected {
 		t.Fatalf("status = %s", res.Status)
 	}
+	if res.SourceProposalID != tx.SourceProposalID {
+		t.Fatalf("source proposal = %q, want %q", res.SourceProposalID, tx.SourceProposalID)
+	}
 	if c.State() != session.Ready {
 		t.Fatalf("state = %s", c.State())
 	}

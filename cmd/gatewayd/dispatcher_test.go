@@ -179,7 +179,7 @@ func TestDiagnoseWriteFailureReturnsTerminalResultAndConsistentAudit(t *testing.
 	for _, rec := range records {
 		kinds = append(kinds, rec.Kind)
 	}
-	want := []string{"proposal", "transaction", "result"}
+	want := []string{"proposal", "auto-readonly-approval", "transaction", "result"}
 	if fmt.Sprint(kinds) != fmt.Sprint(want) {
 		t.Fatalf("audit kinds = %v, want %v", kinds, want)
 	}

@@ -744,11 +744,12 @@ func (c *Coordinator) finishActiveLocked(status command.Status, exitCode *int) {
 		return
 	}
 	res := command.Result{
-		TransactionID: c.act.tx.ID,
-		Status:        status,
-		ExitCode:      exitCode,
-		Duration:      time.Since(c.act.tx.ApprovedAt),
-		CompletedAt:   time.Now(),
+		TransactionID:    c.act.tx.ID,
+		SourceProposalID: c.act.tx.SourceProposalID,
+		Status:           status,
+		ExitCode:         exitCode,
+		Duration:         time.Since(c.act.tx.ApprovedAt),
+		CompletedAt:      time.Now(),
 	}
 	chunk := c.ring.ReadAfter(c.act.startSeq, 1<<20)
 	res.Output = chunk.Data
