@@ -1,0 +1,17 @@
+{
+  "Name": "default",
+  "UART": {
+    "Identity": {
+      "Kind": "usb-serial-by-id",
+      "Key": "REPLACE_WITH_YOUR_SERIAL_BY_ID_PATH"
+    },
+    "Line": {
+      "BaudRate": 115200,
+      "DataBits": 8,
+      "Parity": "none",
+      "StopBits": 1,
+      "Flow": "none"
+    }
+  },
+  "SSH": null
+}
