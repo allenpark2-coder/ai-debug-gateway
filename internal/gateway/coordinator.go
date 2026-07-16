@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -51,6 +52,27 @@ type LoginConfig struct {
 	// SecretGracePeriod is how much longer an executing transaction is
 	// allowed once a secret prompt pauses it.
 	SecretGracePeriod time.Duration
+	// PromptQuietPeriod is how long the line ending in
+	// ShellPromptPattern must stay silent before it is believed. Read
+	// chunks split lines at arbitrary byte boundaries, so a boot-log
+	// line like "... 2.44) #2 SMP ..." split right after its '#' is
+	// indistinguishable from a prompt until the next bytes arrive; a
+	// real prompt is followed by line silence. Zero means
+	// defaultPromptQuietPeriod.
+	PromptQuietPeriod time.Duration
+}
+
+// defaultPromptQuietPeriod bounds how long a shell prompt candidate
+// must stay unextended before it is acted on. Within one UART burst
+// the continuation of a split line arrives in well under a
+// millisecond; a real prompt sits silent until someone types.
+const defaultPromptQuietPeriod = 150 * time.Millisecond
+
+func (cfg LoginConfig) promptQuietPeriod() time.Duration {
+	if cfg.PromptQuietPeriod > 0 {
+		return cfg.PromptQuietPeriod
+	}
+	return defaultPromptQuietPeriod
 }
 
 func (cfg LoginConfig) secretPromptMatches(buf []byte) bool {
@@ -106,6 +128,19 @@ type Coordinator struct {
 	// resyncPending keeps AI disabled after a timeout until the configured
 	// prompt proves that Ctrl-C returned the target to its shell.
 	resyncPending bool
+	// lineTail accumulates the current, still-unterminated console
+	// line across read-chunk boundaries; every prompt pattern matches
+	// against it, never against a raw chunk.
+	lineTail []byte
+	// rebootSuspect is set when a boot banner is seen: replayed boot
+	// text (dmesg, a printed log) emits the same bytes as a real
+	// reboot, so only a following login/password prompt confirms the
+	// reboot, and a completion marker refutes it.
+	rebootSuspect bool
+	// promptGen invalidates a pending shell-prompt confirmation
+	// whenever new bytes arrive; promptTimer holds the pending one.
+	promptGen   uint64
+	promptTimer *time.Timer
 	// readerDone is closed when the current transport's reader
 	// goroutine fully exits, so EndSession can wait on exactly that
 	// goroutine (not the coordinator's whole lifetime, which
@@ -151,6 +186,7 @@ func (c *Coordinator) Stop() {
 	if c.stream != nil {
 		c.stream.Close()
 	}
+	c.resetPromptStateLocked()
 	c.mu.Unlock()
 	c.stopOnce.Do(func() { close(c.stopCh) })
 	c.wg.Wait()
@@ -183,6 +219,7 @@ func (c *Coordinator) start(stream transport.Stream, cfg LoginConfig, opener Ope
 	c.usernameSent = false
 	c.manualReady = false
 	c.resyncPending = false
+	c.resetPromptStateLocked()
 	_ = c.sess.Apply(session.Connect)
 	_ = c.sess.Apply(session.TransportReady)
 	if alreadyAuthenticated {
@@ -243,6 +280,7 @@ func (c *Coordinator) retry(alreadyAuthenticated bool) error {
 	c.usernameSent = false
 	c.manualReady = false
 	c.resyncPending = false
+	c.resetPromptStateLocked()
 	_ = c.sess.Apply(session.TransportReady)
 	if alreadyAuthenticated {
 		_ = c.sess.Apply(session.Authenticated)
@@ -664,61 +702,146 @@ func (c *Coordinator) onData(chunk []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// New bytes invalidate any shell prompt candidate awaiting its
+	// quiet period: what looked like a prompt was a line still being
+	// extended.
+	c.promptGen++
+	// A banner line can arrive and terminate within one chunk, so
+	// content patterns scan the previous tail plus this chunk;
+	// end-anchored prompt patterns then match the advanced tail.
+	scan := append(append(make([]byte, 0, len(c.lineTail)+len(chunk)), c.lineTail...), chunk...)
+	c.advanceLineTailLocked(chunk)
+
 	cfg := c.loginCfg
 	state := c.sess.State()
 
-	if cfg.BootBannerPattern != nil && cfg.BootBannerPattern.Match(chunk) &&
+	// A boot banner alone is only a suspicion: dmesg or a printed
+	// boot log replays the same bytes without any reboot. The
+	// login/password prompt that follows a real reboot (with no
+	// completion marker in between) is what confirms it; a marker
+	// refutes it (handleMarkerLocked).
+	if cfg.BootBannerPattern != nil && cfg.BootBannerPattern.Match(scan) &&
 		(state == session.Ready || state == session.RunningCommand) {
-		c.handleTargetRebootLocked()
-		return
+		c.rebootSuspect = true
 	}
-
-	if c.resyncPending && cfg.ShellPromptPattern != nil && cfg.ShellPromptPattern.Match(chunk) {
-		c.resyncPending = false
+	if c.rebootSuspect && state != session.Authenticating && c.authPromptAtLineEndLocked() {
+		c.rebootSuspect = false
+		c.handleTargetRebootLocked()
+		// The prompt that confirmed the reboot still needs answering.
+		c.handleAuthenticatingLocked()
 		return
 	}
 
 	if c.secretW.Active() {
-		// Only a recognized post-authentication prompt, or the
-		// human's local secret-done operation (not modeled as a
-		// distinct method here), ends the window; a timeout must
-		// never silently end it.
-		if cfg.ShellPromptPattern != nil && cfg.ShellPromptPattern.Match(chunk) {
-			c.secretW.Finish()
-			if state == session.Authenticating {
-				_ = c.sess.Apply(session.Authenticated)
-			}
-		}
+		// Only a recognized post-authentication prompt (believed
+		// after its quiet period), or the human's local secret-done
+		// operation, ends the window; a timeout must never silently
+		// end it.
+		c.armPromptConfirmLocked(cfg)
 		return
 	}
 
-	if cfg.secretPromptMatches(chunk) {
+	if cfg.secretPromptMatches(c.lineTail) {
 		c.secretW.Begin()
 		if c.act != nil {
 			c.act.deadline = time.Now().Add(cfg.SecretGracePeriod)
 		}
+		c.lineTail = c.lineTail[:0]
 		return
 	}
 
 	switch state {
 	case session.Authenticating:
-		c.handleAuthenticatingLocked(chunk)
+		c.handleAuthenticatingLocked()
 	case session.RunningCommand:
 		c.handleMarkerLocked(chunk)
 	}
+	c.armPromptConfirmLocked(cfg)
 }
 
-func (c *Coordinator) handleAuthenticatingLocked(chunk []byte) {
+// advanceLineTailLocked folds chunk into the current unterminated
+// console line: bytes after the last line break start a new tail,
+// otherwise the tail extends, bounded so a pathological line cannot
+// grow it without limit.
+func (c *Coordinator) advanceLineTailLocked(chunk []byte) {
+	const maxLineTail = 1024
+	if i := bytes.LastIndexAny(chunk, "\r\n"); i >= 0 {
+		c.lineTail = append(c.lineTail[:0], chunk[i+1:]...)
+	} else {
+		c.lineTail = append(c.lineTail, chunk...)
+	}
+	if n := len(c.lineTail); n > maxLineTail {
+		copy(c.lineTail, c.lineTail[n-maxLineTail:])
+		c.lineTail = c.lineTail[:maxLineTail]
+	}
+}
+
+func (c *Coordinator) authPromptAtLineEndLocked() bool {
 	cfg := c.loginCfg
-	if cfg.ShellPromptPattern != nil && cfg.ShellPromptPattern.Match(chunk) {
-		_ = c.sess.Apply(session.Authenticated)
+	if cfg.LoginPromptPattern != nil && cfg.LoginPromptPattern.Match(c.lineTail) {
+		return true
+	}
+	return cfg.PasswordPromptPattern != nil && cfg.PasswordPromptPattern.Match(c.lineTail)
+}
+
+// armPromptConfirmLocked schedules the shell prompt currently at the
+// line end to be believed after the quiet period, unless further
+// bytes arrive first.
+func (c *Coordinator) armPromptConfirmLocked(cfg LoginConfig) {
+	if cfg.ShellPromptPattern == nil || !cfg.ShellPromptPattern.Match(c.lineTail) {
 		return
 	}
-	if !c.usernameSent && cfg.LoginPromptPattern != nil && cfg.LoginPromptPattern.Match(chunk) {
+	gen := c.promptGen
+	if c.promptTimer != nil {
+		c.promptTimer.Stop()
+	}
+	c.promptTimer = time.AfterFunc(cfg.promptQuietPeriod(), func() { c.confirmShellPrompt(gen) })
+}
+
+// confirmShellPrompt runs once a shell prompt candidate has survived
+// its quiet period with no further bytes: the line really ends at the
+// prompt, so every prompt-gated state advances.
+func (c *Coordinator) confirmShellPrompt(gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if gen != c.promptGen {
+		return
+	}
+	cfg := c.loginCfg
+	if cfg.ShellPromptPattern == nil || !cfg.ShellPromptPattern.Match(c.lineTail) {
+		return
+	}
+	c.lineTail = c.lineTail[:0]
+	c.rebootSuspect = false
+	c.resyncPending = false
+	if c.secretW.Active() {
+		c.secretW.Finish()
+	}
+	if c.sess.State() == session.Authenticating {
+		_ = c.sess.Apply(session.Authenticated)
+	}
+}
+
+// resetPromptStateLocked clears per-transport prompt tracking and
+// invalidates any pending prompt confirmation.
+func (c *Coordinator) resetPromptStateLocked() {
+	c.promptGen++
+	if c.promptTimer != nil {
+		c.promptTimer.Stop()
+		c.promptTimer = nil
+	}
+	c.lineTail = nil
+	c.rebootSuspect = false
+}
+
+func (c *Coordinator) handleAuthenticatingLocked() {
+	cfg := c.loginCfg
+	if !c.usernameSent && cfg.LoginPromptPattern != nil && cfg.LoginPromptPattern.Match(c.lineTail) {
 		if c.stream != nil {
 			_, _ = c.stream.Write([]byte(cfg.Username + "\n"))
 		}
 		c.usernameSent = true
+		c.lineTail = c.lineTail[:0]
 	}
 }
 
@@ -731,6 +854,9 @@ func (c *Coordinator) handleMarkerLocked(chunk []byte) {
 	if !found {
 		return
 	}
+	// The marker proves the shell survived whatever the output
+	// contained -- including a replayed boot banner.
+	c.rebootSuspect = false
 	c.finishActiveLocked(command.StatusCompleted, &code)
 	_ = c.sess.Apply(session.CommandResult)
 }
@@ -743,6 +869,8 @@ func (c *Coordinator) handleTargetRebootLocked() {
 	_ = c.sess.Apply(session.TargetRebooted)
 	c.usernameSent = false
 	c.manualReady = false
+	c.resyncPending = false
+	c.rebootSuspect = false
 	if c.secretW.Active() {
 		c.secretW.Finish()
 	}

@@ -113,7 +113,11 @@ func TestTargetRebootPreservesSessionIDAndReturnsToAuthenticating(t *testing.T) 
 
 	sessionBefore := c.SessionID()
 
+	// A banner alone is only a suspicion (dmesg replays the same
+	// bytes); the login prompt that follows is what confirms the
+	// reboot and is answered as part of re-authentication.
 	stream.feed([]byte("Booting Linux on physical CPU 0\n"))
+	stream.feed([]byte("login: "))
 	waitFor(t, time.Second, func() bool { return c.State() == session.Authenticating })
 
 	if c.SessionID() != sessionBefore {
@@ -123,8 +127,7 @@ func TestTargetRebootPreservesSessionIDAndReturnsToAuthenticating(t *testing.T) 
 		t.Fatal("AI must be disabled again after a target reboot until re-authentication completes")
 	}
 
-	// Re-authenticate after the simulated reboot.
-	stream.feed([]byte("login: "))
+	// The confirming login prompt is answered as re-authentication.
 	waitFor(t, time.Second, func() bool { return bytes.Contains(stream.writtenSoFar(), []byte("root\n")) })
 	stream.feed([]byte("board $ "))
 	waitFor(t, time.Second, func() bool { return c.AIEnabled() })
@@ -150,6 +153,7 @@ func TestTargetRebootFinalizesActiveTransactionWithoutFabricatingExitCode(t *tes
 	waitFor(t, time.Second, func() bool { return bytes.Contains(stream.writtenSoFar(), []byte("reboot")) })
 
 	stream.feed([]byte("Booting Linux on physical CPU 0\n"))
+	stream.feed([]byte("login: "))
 	waitFor(t, time.Second, func() bool { return c.State() == session.Authenticating })
 
 	res, err := c.commands.Result(tx.ID)

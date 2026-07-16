@@ -175,7 +175,11 @@ func (f *fakeConsole) handleCommandLine(line string) {
 	txn, nonce := m[1], m[2]
 	if f.rebootOn.Load() {
 		f.rebootOn.Store(false)
+		// A real target follows its boot banner with a login prompt;
+		// the banner alone is only a reboot *suspicion* (dmesg replays
+		// the same bytes), and the prompt is what confirms it.
 		f.write("\r\nBooting Linux on physical CPU 0\r\n")
+		f.write("myboard login: ")
 		return
 	}
 

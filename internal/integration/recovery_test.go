@@ -93,6 +93,22 @@ func (h *recoveryHarness) start(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.cmd = cmd
+	// Every started daemon gets its own cleanup: restart-style tests
+	// (start, kill, start) previously leaked the final instance, and a
+	// few hundred leaked daemons accumulate real system load across a
+	// long test session. Signaling an already-killed instance is
+	// harmless, so this stays idempotent with h.kill.
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() { _, _ = cmd.Process.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
