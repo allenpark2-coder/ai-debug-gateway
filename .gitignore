@@ -2,3 +2,5 @@
 .worktrees/
 *.test
 *.out
+/gateway
+/gatewayd
