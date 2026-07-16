@@ -1,4 +1,4 @@
-<title>AI 板端除錯流程 × SigmaStar</title>
+<title>AI 板端除錯流程 × Ambarella</title>
 <!-- Claude artifact 會原生渲染 mermaid（下面的 CDN script 會被其 CSP 擋掉，無害）；
      直接用瀏覽器開這個檔案時則靠這段 script 畫圖（需要網路）。 -->
 <script type="module">
@@ -129,7 +129,7 @@
 
 <main>
   <p class="eyebrow">Internal · AI-Assisted Board Bring-up</p>
-  <h1>讓 AI 安全地上你的 SigmaStar 板子</h1>
+  <h1>讓 AI 安全地上你的 Ambarella 板子</h1>
   <p class="lede">用 ai-debug-gateway 讓工程師和 AI 助手共用同一條 console：唯讀診斷全自動、任何會動到板子的指令都先經過你。</p>
 
   <h2>核心觀念</h2>
@@ -141,7 +141,7 @@
   </div>
 
   <h2>整體架構</h2>
-  <p>開發機一台（AI、SDK、NFS、gateway 全在上面），SigmaStar EVB 一塊，中間 UART 和乙太網路各一條：</p>
+  <p>開發機一台（AI、SDK、NFS、gateway 全在上面），Ambarella EVB 一塊，中間 UART 和乙太網路各一條：</p>
   <figure class="diagram">
     <pre class="mermaid">
 flowchart LR
@@ -151,7 +151,7 @@ flowchart LR
     NFS["NFS server（編好的 bin / ko）"]
     GW["gatewayd（守門 daemon）"]
   end
-  subgraph board["SigmaStar EVB"]
+  subgraph board["Ambarella EVB"]
     CONS["UART console"]
     SSHD["SSH（dropbear）"]
     MNT["mount NFS"]
@@ -181,7 +181,7 @@ flowchart LR
     <figcaption>整圈除了「批准」以外都可以由 AI 自己跑。</figcaption>
   </figure>
   <ol class="loop">
-    <li><b>理解</b>——AI 讀 SigmaStar SDK、內部 wiki、GitHub issue，弄清楚要修什麼、板子長什麼樣。</li>
+    <li><b>理解</b>——AI 讀 Ambarella SDK、內部 wiki、GitHub issue，弄清楚要修什麼、板子長什麼樣。</li>
     <li><b>編譯</b>——在開發機上用 toolchain 交叉編譯，產出 bin 或 kernel module。</li>
     <li><b>部署</b>——產物丟進 NFS 匯出目錄，板子那頭 <code>/mnt/nfs</code> 馬上拿得到。</li>
     <li><b>測試</b>——AI 經 gateway 在板子上執行：唯讀的自動跑，會改狀態的等你批准（或在實驗板上開黑名單模式無人值守）。</li>
@@ -212,7 +212,7 @@ cd ai-debug-gateway-share_0.1.0_linux_amd64
 gateway start              <span class="c"># 終端機 2：開 session</span>
 gateway attach             <span class="c"># 互動終端，打字直通板子</span></pre>
   <p>在 <code>attach</code> 裡按 <span class="kbd">Ctrl-]</span> 進本地命令模式：<code>approve &lt;id&gt;</code> 批准提案、<code>retry uart</code> 斷線重連、<code>detach</code> 離開但保留 session。看到 <code>Password:</code> 時輸入會自動遮蔽；畫面卡在遮蔽狀態就 <span class="kbd">Ctrl-]</span> 後打 <code>secret-done</code>。</p>
-  <p>SigmaStar EVB 的 console 通常是 115200 8N1，跟預設 profile 一致；不同的話改 <code>~/.config/ai-debug-gateway/profiles/default.json</code> 即可。</p>
+  <p>Ambarella EVB 的 console 通常是 115200 8N1，跟預設 profile 一致；不同的話改 <code>~/.config/ai-debug-gateway/profiles/default.json</code> 即可。</p>
 
   <h2>上線前的注意事項</h2>
   <p><b>網路先通。</b>NFS 和 SSH 都吃乙太網路，先確認板子拿得到 IP；順便對時（板端時鐘常停在 1970，會影響 make 時間戳和 TLS）。</p>
