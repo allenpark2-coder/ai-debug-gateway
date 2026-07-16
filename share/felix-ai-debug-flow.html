@@ -214,6 +214,37 @@ gateway attach             <span class="c"># 互動終端，打字直通板子</
   <p>在 <code>attach</code> 裡按 <span class="kbd">Ctrl-]</span> 進本地命令模式：<code>approve &lt;id&gt;</code> 批准提案、<code>retry uart</code> 斷線重連、<code>detach</code> 離開但保留 session。看到 <code>Password:</code> 時輸入會自動遮蔽；畫面卡在遮蔽狀態就 <span class="kbd">Ctrl-]</span> 後打 <code>secret-done</code>。</p>
   <p>Felix EVB 的 console 通常是 115200 8N1，跟預設 profile 一致；不同的話改 <code>~/.config/ai-debug-gateway/profiles/default.json</code> 即可。</p>
 
+  <h2>進階藍圖：自動 debug 與產測</h2>
+  <p>基本迴圈跑順之後，這套架構可以再往上疊一層：讓 AI 讀過 SDK 的 debug 歷史、懂這塊板子之後，<b>自己加 printf、自己編、自己上板測、自己把學到的坑寫回 wiki</b>；產測軟體也用同一套迴圈開發和驗證。</p>
+  <figure class="diagram">
+    <pre class="mermaid">
+flowchart LR
+  subgraph host["Ubuntu 開發機"]
+    KNOW["SDK + debug wiki + issues<br/>（歷史經驗）"]
+    AI["AI（Claude / Codex）"]
+    NFS2["NFS"]
+    GW2["gatewayd"]
+    PT["產測 Web UI（Vue）"]
+  end
+  BOARD["Felix EVB"]
+  AI -- "讀歷史" --> KNOW
+  AI -. "回寫實驗紀錄" .-> KNOW
+  AI -- "加 printf、編譯" --> NFS2
+  AI -- "Playwright 操作" --> PT
+  PT -- "從 UI 打激勵" --> BOARD
+  AI -- "diagnose / propose" --> GW2
+  GW2 -- "console 觀察結果" --> BOARD
+  NFS2 -. "bin / ko" .-> BOARD
+    </pre>
+    <figcaption>兩側夾擊驗證：Playwright 從產測 UI 打激勵，gateway 從 console 看板子反應；wiki 回寫讓 AI 一次比一次懂這塊板子。</figcaption>
+  </figure>
+  <p>三個讓它真正無人值守的前提：</p>
+  <ol class="loop">
+    <li><b>實驗板開黑名單模式</b>——「跑重編過的 bin」每一圈都是變更操作，靠人批准迴圈就快不起來；<code>--unsafe-auto-shell</code> 就是為這個場景設計的。</li>
+    <li><b>先走快路徑</b>——wiki 裡定一條準則：先用 <code>dmesg</code>、<code>/proc</code>、既有 log 診斷，證明不夠再加 printf 重編。kernel 本體要重燒，迴圈成本不同，分開規劃。</li>
+    <li><b>電源 / reset 可控</b>——AI 把板子搞掛時迴圈不能斷在「等人按重開」；USB 繼電器或可控 PDU 補上最後一塊。</li>
+  </ol>
+
   <h2>上線前的注意事項</h2>
   <p><b>網路先通。</b>NFS 和 SSH 都吃乙太網路，先確認板子拿得到 IP；順便對時（板端時鐘常停在 1970，會影響 make 時間戳和 TLS）。</p>
   <p><b>「跑測試 bin」不是唯讀。</b>執行 NFS 上的程式一定過不了白名單——要嘛人工 <code>approve</code>，要嘛在實驗板上開黑名單模式。規劃無人值守測試時先想清楚走哪條。</p>
