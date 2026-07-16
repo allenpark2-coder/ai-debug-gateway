@@ -1,0 +1,217 @@
+<title>AI 板端除錯流程 × SigmaStar</title>
+<style>
+  :root {
+    --paper: #F7F8F5;
+    --ink: #1D2422;
+    --muted: #5B6663;
+    --line: #D9DFDA;
+    --card: #FFFFFF;
+    --accent: #0E7C66;
+    --accent-ink: #0A5D4D;
+    --copper: #B0672A;
+    --code-bg: #EDF1EC;
+    --warn-bg: #FBF3E9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121815;
+      --ink: #E6ECE8;
+      --muted: #93A19B;
+      --line: #2A342F;
+      --card: #1A211D;
+      --accent: #3FBF9F;
+      --accent-ink: #5ED4B6;
+      --copper: #D89055;
+      --code-bg: #1F2823;
+      --warn-bg: #241D14;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #121815; --ink: #E6ECE8; --muted: #93A19B; --line: #2A342F;
+    --card: #1A211D; --accent: #3FBF9F; --accent-ink: #5ED4B6;
+    --copper: #D89055; --code-bg: #1F2823; --warn-bg: #241D14;
+  }
+  :root[data-theme="light"] {
+    --paper: #F7F8F5; --ink: #1D2422; --muted: #5B6663; --line: #D9DFDA;
+    --card: #FFFFFF; --accent: #0E7C66; --accent-ink: #0A5D4D;
+    --copper: #B0672A; --code-bg: #EDF1EC; --warn-bg: #FBF3E9;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+    line-height: 1.75;
+    margin: 0;
+  }
+  main { max-width: 46rem; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+
+  .eyebrow {
+    font-size: 0.75rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-size: 1.9rem; line-height: 1.3; margin: 0 0 0.5rem;
+    text-wrap: balance; font-weight: 700;
+  }
+  .lede { color: var(--muted); font-size: 1.05rem; margin: 0 0 0.5rem; }
+  h2 {
+    font-size: 1.3rem; margin: 3rem 0 0.75rem; font-weight: 700;
+    text-wrap: balance; padding-top: 1.5rem; border-top: 1px solid var(--line);
+  }
+  h3 { font-size: 1.02rem; margin: 1.5rem 0 0.5rem; font-weight: 700; }
+  p { margin: 0.6rem 0; }
+  a { color: var(--accent-ink); }
+
+  .principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.75rem; margin: 1.25rem 0; }
+  .principle {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 0.9rem 1rem;
+  }
+  .principle b { display: block; margin-bottom: 0.2rem; color: var(--accent-ink); }
+  .principle span { font-size: 0.9rem; color: var(--muted); }
+
+  .diagram {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 1rem; margin: 1.25rem 0; overflow-x: auto;
+  }
+  .diagram figcaption {
+    font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem;
+    letter-spacing: 0.05em;
+  }
+
+  ol.loop { padding-left: 1.4rem; margin: 1rem 0; }
+  ol.loop li { margin: 0.55rem 0; }
+  ol.loop li::marker { color: var(--accent); font-weight: 700; }
+
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92rem; }
+  .tablewrap { overflow-x: auto; }
+  th, td { border: 1px solid var(--line); padding: 0.5rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 700; white-space: nowrap; }
+  td code, p code, li code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.86em; background: var(--code-bg); border-radius: 3px; padding: 0.1em 0.35em;
+  }
+
+  pre.sh {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 0.9rem 1rem; overflow-x: auto; line-height: 1.6;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem;
+  }
+  pre.sh .c { color: var(--muted); }
+
+  .warn {
+    background: var(--warn-bg); border: 1px solid var(--line);
+    border-left: 3px solid var(--copper); border-radius: 4px;
+    padding: 0.75rem 1rem; margin: 1rem 0; font-size: 0.95rem;
+  }
+  .warn b { color: var(--copper); }
+
+  .kbd {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+    padding: 0 0.4em; background: var(--card);
+  }
+  footer {
+    margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--line);
+    font-size: 0.82rem; color: var(--muted);
+  }
+</style>
+
+<main>
+  <p class="eyebrow">Internal · AI-Assisted Board Bring-up</p>
+  <h1>讓 AI 安全地上你的 SigmaStar 板子</h1>
+  <p class="lede">用 ai-debug-gateway 讓工程師和 AI 助手共用同一條 console：唯讀診斷全自動、任何會動到板子的指令都先經過你。</p>
+
+  <h2>核心觀念</h2>
+  <p>AI 很會讀 log、下診斷指令、交叉比對 SDK 和 wiki，但不能讓它直接拿到序列埠——一條 <code>reboot</code> 或亂改 flash 的指令就可能毀掉重現中的問題現場。這套流程的答案是在中間放一個守門的 daemon：</p>
+  <div class="principles">
+    <div class="principle"><b>單一擁有者</b><span>只有 gatewayd 打得開 UART / SSH，人和 AI 都透過它，永遠不搶埠。</span></div>
+    <div class="principle"><b>唯讀自動、變更要批准</b><span>白名單內的唯讀指令 AI 自動執行；會改板子狀態的指令變成提案，等人批准。</span></div>
+    <div class="principle"><b>全程留紀錄</b><span>每條指令、每次批准都進 audit log；你打的密碼自動遮蔽，不進任何紀錄。</span></div>
+  </div>
+
+  <h2>整體架構</h2>
+  <p>開發機一台（AI、SDK、NFS、gateway 全在上面），SigmaStar EVB 一塊，中間 UART 和乙太網路各一條：</p>
+  <figure class="diagram">
+    <pre class="mermaid">
+flowchart LR
+  subgraph host["Ubuntu 開發機"]
+    AI["AI 助手（Claude / Codex）"]
+    REPO["SDK repo + wiki + issues"]
+    NFS["NFS server（編好的 bin / ko）"]
+    GW["gatewayd（守門 daemon）"]
+  end
+  subgraph board["SigmaStar EVB"]
+    CONS["UART console"]
+    SSHD["SSH（dropbear）"]
+    MNT["mount NFS"]
+  end
+  AI -- "讀 code / wiki / issue" --> REPO
+  AI -- "編譯後放 bin" --> NFS
+  AI -- "gateway CLI" --> GW
+  ENG["工程師 gateway attach"] --> GW
+  GW -- "console" --> CONS
+  GW -. "或 SSH" .-> SSHD
+  NFS -. "乙太網路" .-> MNT
+    </pre>
+    <figcaption>gatewayd 是唯一碰得到板子的程序；AI 和工程師都是它的 client。</figcaption>
+  </figure>
+  <p>部署走 NFS 而不是走 console 傳檔：板子 mount 開發機的 NFS 之後，AI 編好的 bin / <code>.ko</code> 放進去板子立刻看得到，不用燒錄、不用 tftp 一個一個丟。</p>
+
+  <h2>開發迴圈</h2>
+  <figure class="diagram">
+    <pre class="mermaid">
+flowchart LR
+  A["1 理解<br/>SDK + wiki + issue"] --> B["2 編譯<br/>bin / ko"]
+  B --> C["3 部署<br/>放進 NFS"]
+  C --> D["4 測試<br/>經 gateway 上板"]
+  D --> E["5 分析<br/>log / 結果"]
+  E -- "修 code / 回 issue" --> B
+    </pre>
+    <figcaption>整圈除了「批准」以外都可以由 AI 自己跑。</figcaption>
+  </figure>
+  <ol class="loop">
+    <li><b>理解</b>——AI 讀 SigmaStar SDK、內部 wiki、GitHub issue，弄清楚要修什麼、板子長什麼樣。</li>
+    <li><b>編譯</b>——在開發機上用 toolchain 交叉編譯，產出 bin 或 kernel module。</li>
+    <li><b>部署</b>——產物丟進 NFS 匯出目錄，板子那頭 <code>/mnt/nfs</code> 馬上拿得到。</li>
+    <li><b>測試</b>——AI 經 gateway 在板子上執行：唯讀的自動跑，會改狀態的等你批准（或在實驗板上開黑名單模式無人值守）。</li>
+    <li><b>分析</b>——AI 收 console 輸出和測試結果，判斷修好沒，回頭改 code 或更新 issue。</li>
+  </ol>
+
+  <h2>權限模型：誰能做什麼</h2>
+  <p>gatewayd 開三～四個 owner-only 的 Unix socket，角色從 socket 層就分開，AI 拿不到「批准」的能力：</p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Socket</th><th>誰用</th><th>能做什麼</th></tr>
+    <tr><td><code>attach</code></td><td>工程師</td><td>互動終端：打字直通板子、<code>approve</code> / <code>reject</code> AI 的提案</td></tr>
+    <tr><td><code>control</code></td><td>AI</td><td>看狀態、讀 console 輸出、<b>提案</b>指令（不會執行）</td></tr>
+    <tr><td><code>diagnose</code></td><td>AI</td><td>自動執行<b>白名單唯讀</b>指令（<code>ps</code>、<code>dmesg</code>、<code>cat /proc/...</code>…），要開 <code>--auto-readonly</code> 才存在</td></tr>
+    <tr><td><code>unsafeshell</code></td><td>AI</td><td>黑名單模式：無人值守執行變更指令，<b>僅限可重刷的實驗板</b>，要另簽 <code>risk_accepted</code> 才存在</td></tr>
+  </table>
+  </div>
+  <p>兩種自動模式是獨立開關：日常用白名單就夠；跑整夜迴歸測試、板子隨時可以重燒 IPL + kernel 救回來的，才考慮黑名單模式。OTP / eFuse 這類燒了就回不去的操作，永遠不該給黑名單模式的板子。</p>
+
+  <h2>快速上手（10 分鐘）</h2>
+  <p>repo 的 <code>share/</code> 有打好的分享包，解開跑安裝腳本就好：</p>
+  <pre class="sh"><span class="c"># 從 repo share/ 抓 tarball，先解開再跑（binary 在包裡）</span>
+tar xzf ai-debug-gateway-share_0.1.0_linux_amd64.tar.gz
+cd ai-debug-gateway-share_0.1.0_linux_amd64
+./setup.sh   <span class="c"># 裝 binary、自動偵測 USB 轉接器、建好 profile 和 policy</span></pre>
+  <p>之後每天就三行：</p>
+  <pre class="sh">gatewayd --auto-readonly   <span class="c"># 終端機 1：daemon，獨占序列埠</span>
+gateway start              <span class="c"># 終端機 2：開 session</span>
+gateway attach             <span class="c"># 互動終端，打字直通板子</span></pre>
+  <p>在 <code>attach</code> 裡按 <span class="kbd">Ctrl-]</span> 進本地命令模式：<code>approve &lt;id&gt;</code> 批准提案、<code>retry uart</code> 斷線重連、<code>detach</code> 離開但保留 session。看到 <code>Password:</code> 時輸入會自動遮蔽；畫面卡在遮蔽狀態就 <span class="kbd">Ctrl-]</span> 後打 <code>secret-done</code>。</p>
+  <p>SigmaStar EVB 的 console 通常是 115200 8N1，跟預設 profile 一致；不同的話改 <code>~/.config/ai-debug-gateway/profiles/default.json</code> 即可。</p>
+
+  <h2>上線前的注意事項</h2>
+  <p><b>網路先通。</b>NFS 和 SSH 都吃乙太網路，先確認板子拿得到 IP；順便對時（板端時鐘常停在 1970，會影響 make 時間戳和 TLS）。</p>
+  <p><b>「跑測試 bin」不是唯讀。</b>執行 NFS 上的程式一定過不了白名單——要嘛人工 <code>approve</code>，要嘛在實驗板上開黑名單模式。規劃無人值守測試時先想清楚走哪條。</p>
+  <p><b>UART 和 SSH 一次用一個。</b>一個 session 一個 transport：日常測試走 SSH（快），UART 留給開機階段和網路掛掉時救援。</p>
+  <div class="warn"><b>已知問題（修復中）：</b>經 UART 的 diagnose 不要跑 <code>dmesg</code>——輸出裡的開機字樣會被誤判成板子重開機；有密碼的板子登入中 <code>status</code> 可能提早顯示 READY；遮蔽視窗卡住時用 <code>secret-done</code> 手動解除。走 SSH 可避開前兩項。</div>
+
+  <footer>
+    ai-debug-gateway · github.com/allenpark2-coder/ai-debug-gateway · 分享包在 repo <code>share/</code> · 2026-07
+  </footer>
+</main>
