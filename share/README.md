@@ -13,11 +13,19 @@
 
 ## 安裝
 
-解開分享包之後：
+從 repo 的 `share/` 抓預編譯包（或由同事直接傳給你），**先解開再跑
+`setup.sh`**——binary 在 tarball 裡面，直接跑 repo 裡的 `share/setup.sh`
+只會建設定檔、不會裝 binary：
 
 ```sh
+sha256sum -c ai-debug-gateway-share_0.1.0_linux_amd64.sha256   # 可選：驗證
+tar xzf ai-debug-gateway-share_0.1.0_linux_amd64.tar.gz
+cd ai-debug-gateway-share_0.1.0_linux_amd64
 ./setup.sh
 ```
+
+（有 Go 環境的人也可以在 repo 根目錄 `go build ./cmd/gatewayd ./cmd/gateway`
+自己編，再跑 `share/setup.sh` 建設定檔。）
 
 腳本會把 `gateway` / `gatewayd` 裝到 `~/.local/bin`、建立預設的板子
 profile（只接一個轉接器時會自動填好裝置路徑）和空白的診斷政策檔，
