@@ -60,6 +60,21 @@ type LoginConfig struct {
 	// real prompt is followed by line silence. Zero means
 	// defaultPromptQuietPeriod.
 	PromptQuietPeriod time.Duration
+	// AuthRetryPeriod is how long authentication may stall before the
+	// coordinator nudges the console with a bare newline. Prompt
+	// recognition is edge-triggered on the unterminated line tail, and
+	// advanceLineTailLocked discards that tail whenever a chunk carries
+	// a line break -- so a kernel message printed right after "login: "
+	// (a link-up notice is the common one) erases the prompt before it
+	// can be matched. getty does not reprint on its own, so without a
+	// nudge the session stays in AUTHENTICATING forever. Zero means
+	// defaultAuthRetryPeriod.
+	AuthRetryPeriod time.Duration
+	// AuthRetryLimit bounds those nudges. Once spent, the session stays
+	// in AUTHENTICATING: a board that is simply off must look stuck
+	// rather than have the gateway type at it indefinitely. Zero means
+	// defaultAuthRetryLimit.
+	AuthRetryLimit int
 }
 
 // defaultPromptQuietPeriod bounds how long a shell prompt candidate
@@ -73,6 +88,29 @@ func (cfg LoginConfig) promptQuietPeriod() time.Duration {
 		return cfg.PromptQuietPeriod
 	}
 	return defaultPromptQuietPeriod
+}
+
+// defaultAuthRetryPeriod is long enough that a board still printing its
+// boot log is left alone, short enough that a missed prompt costs one
+// wait rather than the whole session.
+const defaultAuthRetryPeriod = 5 * time.Second
+
+// defaultAuthRetryLimit caps the nudges at roughly half a minute of
+// trying, after which staying stuck is the honest report.
+const defaultAuthRetryLimit = 5
+
+func (cfg LoginConfig) authRetryPeriod() time.Duration {
+	if cfg.AuthRetryPeriod > 0 {
+		return cfg.AuthRetryPeriod
+	}
+	return defaultAuthRetryPeriod
+}
+
+func (cfg LoginConfig) authRetryLimit() int {
+	if cfg.AuthRetryLimit > 0 {
+		return cfg.AuthRetryLimit
+	}
+	return defaultAuthRetryLimit
 }
 
 func (cfg LoginConfig) secretPromptMatches(buf []byte) bool {
@@ -141,6 +179,12 @@ type Coordinator struct {
 	// whenever new bytes arrive; promptTimer holds the pending one.
 	promptGen   uint64
 	promptTimer *time.Timer
+	// authRetryTimer nudges a stalled authentication with a bare
+	// newline; authRetries counts the nudges spent, authGen
+	// invalidates a pending one after the state has moved on.
+	authRetryTimer *time.Timer
+	authRetries    int
+	authGen        uint64
 	// readerDone is closed when the current transport's reader
 	// goroutine fully exits, so EndSession can wait on exactly that
 	// goroutine (not the coordinator's whole lifetime, which
@@ -224,6 +268,11 @@ func (c *Coordinator) start(stream transport.Stream, cfg LoginConfig, opener Ope
 	_ = c.sess.Apply(session.TransportReady)
 	if alreadyAuthenticated {
 		_ = c.sess.Apply(session.Authenticated)
+	} else {
+		// A console that says nothing at all -- already past its login,
+		// or parked on a stale prompt -- would otherwise never reach
+		// handleAuthenticatingLocked, so arm the first nudge here.
+		c.armAuthRetryLocked()
 	}
 	done := make(chan struct{})
 	c.readerDone = done
@@ -284,6 +333,11 @@ func (c *Coordinator) retry(alreadyAuthenticated bool) error {
 	_ = c.sess.Apply(session.TransportReady)
 	if alreadyAuthenticated {
 		_ = c.sess.Apply(session.Authenticated)
+	} else {
+		// A console that says nothing at all -- already past its login,
+		// or parked on a stale prompt -- would otherwise never reach
+		// handleAuthenticatingLocked, so arm the first nudge here.
+		c.armAuthRetryLocked()
 	}
 	done := make(chan struct{})
 	c.readerDone = done
@@ -495,6 +549,8 @@ func (c *Coordinator) EndSecret() {
 	defer c.mu.Unlock()
 	c.secretW.Finish()
 	if c.sess.State() == session.Authenticating {
+		c.stopAuthRetryLocked()
+		c.authRetries = 0
 		_ = c.sess.Apply(session.Authenticated)
 	}
 }
@@ -830,8 +886,71 @@ func (c *Coordinator) resetPromptStateLocked() {
 		c.promptTimer.Stop()
 		c.promptTimer = nil
 	}
+	c.stopAuthRetryLocked()
+	c.authRetries = 0
 	c.lineTail = nil
 	c.rebootSuspect = false
+}
+
+// stopAuthRetryLocked cancels a pending nudge and invalidates any that
+// is already on its way to firing.
+func (c *Coordinator) stopAuthRetryLocked() {
+	c.authGen++
+	if c.authRetryTimer != nil {
+		c.authRetryTimer.Stop()
+		c.authRetryTimer = nil
+	}
+}
+
+// armAuthRetryLocked schedules a newline nudge for an authentication
+// that has gone quiet. It is re-armed on every read chunk while the
+// session authenticates, so the timer only fires once the console has
+// actually stalled -- a board mid-boot-log keeps pushing it back.
+func (c *Coordinator) armAuthRetryLocked() {
+	cfg := c.loginCfg
+	if c.stream == nil || c.secretW.Active() {
+		return
+	}
+	if c.authRetries >= cfg.authRetryLimit() {
+		return
+	}
+	c.authGen++
+	gen := c.authGen
+	if c.authRetryTimer != nil {
+		c.authRetryTimer.Stop()
+	}
+	c.authRetryTimer = time.AfterFunc(cfg.authRetryPeriod(), func() { c.retryAuth(gen) })
+}
+
+// retryAuth writes a bare newline so getty reprints its login prompt,
+// then clears usernameSent so the next prompt is answered again. A
+// newline is the whole nudge: it cannot leak a secret, and at a stale
+// "Password:" it submits an empty answer, which fails the attempt and
+// returns the console to "login:" -- exactly where we want it.
+func (c *Coordinator) retryAuth(gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if gen != c.authGen || c.sess.State() != session.Authenticating {
+		return
+	}
+	if c.stream == nil || c.secretW.Active() {
+		return
+	}
+	// A shell prompt sitting out its quiet period is authentication
+	// about to succeed; typing into it would both wipe the tail the
+	// confirmation matches against and add a stray line.
+	if cfg := c.loginCfg; cfg.ShellPromptPattern != nil &&
+		cfg.ShellPromptPattern.Match(c.lineTail) {
+		c.armAuthRetryLocked()
+		return
+	}
+	c.authRetries++
+	_, _ = c.stream.Write([]byte("\n"))
+	// The tail is deliberately left alone: it may already hold a prompt
+	// that the next chunk completes, and clearing usernameSent is what
+	// re-arms the answer.
+	c.usernameSent = false
+	c.armAuthRetryLocked()
 }
 
 func (c *Coordinator) handleAuthenticatingLocked() {
@@ -843,6 +962,7 @@ func (c *Coordinator) handleAuthenticatingLocked() {
 		c.usernameSent = true
 		c.lineTail = c.lineTail[:0]
 	}
+	c.armAuthRetryLocked()
 }
 
 func (c *Coordinator) handleMarkerLocked(chunk []byte) {
