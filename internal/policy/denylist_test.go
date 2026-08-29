@@ -92,3 +92,42 @@ func TestCommonPolicyUnaffectedByDenylistExtraction(t *testing.T) {
 		}
 	}
 }
+
+func TestDenylistAllowAllPathsBypassesSensitivePaths(t *testing.T) {
+	p := Denylist(DenylistRules{AllowAllPaths: true})
+	// Every one of these is denied by default (see the policy_test
+	// sensitive-path table); with AllowAllPaths they must be allowed.
+	for _, line := range []string{
+		`cat /proc/1/environ`,
+		`cat /proc/self/mem`,
+		`cat /proc/kcore`,
+		`cat /sys/class/net/eth0/address`,
+		`cat /dev/mtd0`,
+		`cat /etc/shadow`,
+	} {
+		if d := p.Evaluate(line); !d.Allowed {
+			t.Errorf("AllowAllPaths should permit %q, denied: %s", line, d.Reason)
+		}
+	}
+}
+
+func TestDenylistAllowAllPathsStillEnforcesOtherRules(t *testing.T) {
+	// AllowAllPaths only lifts the path check; hard-denied interpreters
+	// and board deny rules must still bite.
+	p := Denylist(DenylistRules{AllowAllPaths: true, DenyExecutables: []string{"reboot"}})
+	for _, line := range []string{
+		`sh -c 'cat /proc/1/environ'`, // interpreter hard-deny
+		`reboot`,                      // board deny rule
+	} {
+		if d := p.Evaluate(line); d.Allowed {
+			t.Errorf("AllowAllPaths must not permit %q", line)
+		}
+	}
+}
+
+func TestDenylistDefaultStillBlocksSensitivePaths(t *testing.T) {
+	p := Denylist(DenylistRules{}) // AllowAllPaths defaults to false
+	if d := p.Evaluate(`cat /proc/1/environ`); d.Allowed {
+		t.Fatal("without AllowAllPaths, /proc/1/environ must stay denied")
+	}
+}

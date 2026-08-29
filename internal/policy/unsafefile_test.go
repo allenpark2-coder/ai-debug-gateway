@@ -85,3 +85,32 @@ func TestLoadUnsafeShellFileHasNoAllowConcept(t *testing.T) {
 		t.Fatal("an \"allow\" field must be rejected as an unknown field, not accepted")
 	}
 }
+
+func TestLoadUnsafeShellFileAllowAllPaths(t *testing.T) {
+	name := writePolicyFile(t, 0o600, `{
+		"risk_accepted": true,
+		"allow_all_paths": true
+	}`)
+	p, err := LoadUnsafeShellFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Evaluate("cat /proc/1/environ").Allowed {
+		t.Error("allow_all_paths in the unsafe-shell file must lift the sensitive-path check")
+	}
+	// Even with all paths allowed, interpreters stay hard-denied.
+	if p.Evaluate("sh -c 'id'").Allowed {
+		t.Fatal("allow_all_paths must not weaken hard denials")
+	}
+}
+
+func TestLoadUnsafeShellFileAllowAllPathsDefaultsFalse(t *testing.T) {
+	name := writePolicyFile(t, 0o600, `{"risk_accepted": true}`)
+	p, err := LoadUnsafeShellFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Evaluate("cat /proc/1/environ").Allowed {
+		t.Fatal("without allow_all_paths the sensitive-path check must stay on")
+	}
+}

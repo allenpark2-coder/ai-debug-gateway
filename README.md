@@ -79,10 +79,17 @@ separate from the diagnostic policy directory above, containing at least
 that they accept this risk. The file must be mode `0600`; a missing or
 invalid file disables only this socket, never manual mode or
 `--auto-readonly`. Interpreters (`sh`, `python`, ...), `eval`, command/process
-substitution, indirect execution (`exec`, `env`, `xargs`, `find -exec`), and
-sensitive-path reads remain denied unconditionally and cannot be overridden
-by the board file; the file can only add further denials (`deny_executables`,
-`deny_exact`) on top of that, never grant an exception to them. See
+substitution, and indirect execution (`exec`, `env`, `xargs`, `find -exec`)
+remain denied unconditionally and cannot be overridden by the board file.
+Sensitive-path reads (procfs/sysfs/devfs beyond a few global diagnostics,
+the password database, SSH key material, gateway state) are also denied by
+default, but a board whose file sets `"allow_all_paths": true` lifts *only*
+that path check for that one board's denylist socket -- an explicit opt-out
+for a throwaway lab board where credential exposure through the AI transcript
+is acceptable. It never touches `--auto-readonly` or any other board, and
+the interpreter/exec hard denials still apply. Apart from that one opt-out
+the board file can only *add* denials (`deny_executables`, `deny_exact`),
+never grant an exception. See
 `docs/superpowers/specs/2026-07-15-auto-shell-denylist-design.md` for the
 full design.
 

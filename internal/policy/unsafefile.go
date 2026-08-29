@@ -11,6 +11,7 @@ import (
 // only narrow what DenylistPolicy already permits, never widen it.
 type unsafeShellFileWire struct {
 	RiskAccepted    bool           `json:"risk_accepted"`
+	AllowAllPaths   bool           `json:"allow_all_paths"`
 	DenyExecutables []string       `json:"deny_executables"`
 	DenyExact       []argvRuleWire `json:"deny_exact"`
 }
@@ -71,5 +72,6 @@ func LoadUnsafeShellFile(path string) (*DenylistPolicy, error) {
 	return Denylist(DenylistRules{
 		DenyExecutables: wire.DenyExecutables,
 		DenyExact:       denyExact,
+		AllowAllPaths:   wire.AllowAllPaths,
 	}), nil
 }

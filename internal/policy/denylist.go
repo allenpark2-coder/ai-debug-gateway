@@ -52,6 +52,13 @@ func hardDenyReason(argv []string) string {
 type DenylistRules struct {
 	DenyExecutables []string
 	DenyExact       []ArgvRule
+	// AllowAllPaths, when true, disables this policy's built-in
+	// sensitive-path check (procfs/sysfs/devfs limits, the password
+	// database, SSH key material, and gateway state). It is a
+	// per-board opt-in a human sets in the board's unsafe-shell file,
+	// on top of the risk_accepted this mode already requires. It never
+	// affects the allowlist Policy, only this board's denylist mode.
+	AllowAllPaths bool
 }
 
 // DenylistPolicy allows every syntactically valid simple command unless it
@@ -63,6 +70,7 @@ type DenylistRules struct {
 type DenylistPolicy struct {
 	denyExecutables map[string]struct{}
 	denyExact       map[string]map[string]struct{}
+	allowAllPaths   bool
 }
 
 // Denylist builds a DenylistPolicy from already-validated rules.
@@ -78,7 +86,7 @@ func Denylist(rules DenylistRules) *DenylistPolicy {
 		}
 		denyExact[rule.Executable][argvKey(rule.Args)] = struct{}{}
 	}
-	return &DenylistPolicy{denyExecutables: denyExecutables, denyExact: denyExact}
+	return &DenylistPolicy{denyExecutables: denyExecutables, denyExact: denyExact, allowAllPaths: rules.AllowAllPaths}
 }
 
 // Evaluate implements the same contract as (*Policy).Evaluate.
@@ -96,9 +104,11 @@ func (p *DenylistPolicy) classifyArgv(argv []string) Decision {
 	if reason := hardDenyReason(argv); reason != "" {
 		return deny("denylist.hard", reason)
 	}
-	for _, arg := range argv[1:] {
-		if reason := unsafePath(arg); reason != "" {
-			return deny("path.sensitive", reason)
+	if !p.allowAllPaths {
+		for _, arg := range argv[1:] {
+			if reason := unsafePath(arg); reason != "" {
+				return deny("path.sensitive", reason)
+			}
 		}
 	}
 	exe := argv[0]
