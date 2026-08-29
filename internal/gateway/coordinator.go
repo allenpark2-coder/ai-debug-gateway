@@ -298,9 +298,18 @@ func (c *Coordinator) StartSSH(stream transport.Stream, opener Opener) error {
 	return c.start(stream, LoginConfig{}, opener, "ssh", true)
 }
 
-// retry is the shared human-approved-retry mechanism for RetryUART and
-// RetrySSH: only whether the transport's handshake already completed
-// authentication before the new stream existed differs.
+// StartTelnet begins a session on an already-connected telnet stream.
+// telnetd spawns the board's own login on a pty, so the UART console
+// login state machine applies unchanged; only the byte carrier
+// differs. opener is used by a later RetryTelnet to redial.
+func (c *Coordinator) StartTelnet(stream transport.Stream, cfg LoginConfig, opener Opener) error {
+	return c.start(stream, cfg, opener, "telnet", false)
+}
+
+// retry is the shared human-approved-retry mechanism for the
+// per-transport Retry entry points: only whether the transport's
+// handshake already completed authentication before the new stream
+// existed differs.
 func (c *Coordinator) retry(alreadyAuthenticated bool) error {
 	c.mu.Lock()
 	if c.sess.State() != session.Reconnecting {
@@ -354,6 +363,11 @@ func (c *Coordinator) retry(alreadyAuthenticated bool) error {
 // the identity yields ErrHumanSelectionRequired, and the session ID is
 // left unchanged.
 func (c *Coordinator) RetryUART() error { return c.retry(false) }
+
+// RetryTelnet is the human-approved retry for a RECONNECTING telnet
+// session. Like a UART retry the new stream is unauthenticated: the
+// console login state machine runs again after the redial.
+func (c *Coordinator) RetryTelnet() error { return c.retry(false) }
 
 // RetrySSH is the human-approved retry for a RECONNECTING SSH session.
 // Like RetryUART, it requires the Opener supplied to StartSSH; a

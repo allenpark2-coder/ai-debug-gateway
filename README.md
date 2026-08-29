@@ -1,8 +1,9 @@
 # ai-debug-gateway
 
 A host-side debug gateway that lets a human and an AI assistant share a
-persistent ARM target console over UART or SSH. `gatewayd` is the only
-process allowed to own the serial device or SSH connection; every
+persistent ARM target console over UART, SSH, or telnet. `gatewayd` is
+the only process allowed to own the serial device or network
+connection; every
 State-changing AI-proposed commands must be explicitly approved by a human
 before they reach the target. An optional, policy-gated diagnostic mode can
 execute a small built-in set of read-only commands automatically, and a
@@ -108,6 +109,7 @@ secret             # manually open the secret-entry window
 secret-done        # manually close it
 retry uart         # human-approved reconnect after a UART transport loss
 retry ssh          # human-approved reconnect after an SSH disconnect
+retry telnet       # human-approved reconnect after a telnet disconnect
 takeover           # end the running AI transaction now, regain control
 detach             # leave the session running, exit the terminal
 end                # end the session, then exit
@@ -127,8 +129,13 @@ locations, and each transport's authentication and reconnect model.
   transcript, audit, and secret-window logic. No `/dev`, socket, or
   terminal API imports.
 - `internal/transport`, `internal/transport/serial`,
-  `internal/transport/ssh` -- the common `Stream` interface and the
-  Linux UART and SSH implementations. SSH also has its own
+  `internal/transport/ssh`, `internal/transport/telnet` -- the common
+  `Stream` interface and the Linux UART, SSH, and telnet
+  implementations. Telnet is a plain-NVT client (every option
+  refused): it carries no encryption and no server authentication, so
+  it is only appropriate on a lab network trusted like a serial
+  cable, and it lands on the board's own login prompt, driven by the
+  same console login flow as UART. SSH also has its own
   authentication ordering (`AuthFactory`) and host-key verification
   (`HostKeyVerifier`).
 - `internal/gateway` -- the `Coordinator` that wires the above to one

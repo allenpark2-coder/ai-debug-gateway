@@ -19,6 +19,7 @@ import (
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport"
 	"github.com/allenpark2-coder/ai-debug-gateway/internal/transport/serial"
 	sshtransport "github.com/allenpark2-coder/ai-debug-gateway/internal/transport/ssh"
+	telnettransport "github.com/allenpark2-coder/ai-debug-gateway/internal/transport/telnet"
 )
 
 // defaultRetentionLimit bounds how many durable records records.export
@@ -61,6 +62,10 @@ type dispatcher struct {
 	// and network dial; production code leaves it nil and falls back
 	// to a real host-key verifier, a real auth factory, and ssh.Open.
 	dialSSH func(prof *profile.SSHConfig, auth sshtransport.HumanAuth) (transport.Stream, error)
+
+	// dialTelnet is overridden in tests to avoid a network dial;
+	// production code leaves it nil and falls back to telnet.Open.
+	dialTelnet func(prof *profile.TelnetConfig) (transport.Stream, error)
 }
 
 func newDispatcher(board, profileDir string, coord *gateway.Coordinator, open *openSet, aw *audit.Writer, tw *transcript.Writer, loginCfg gateway.LoginConfig) *dispatcher {
@@ -104,6 +109,13 @@ func (d *dispatcher) doDialSSH(prof *profile.SSHConfig, auth sshtransport.HumanA
 		return nil, err
 	}
 	return sshtransport.Open(context.Background(), prof, verifier, sshtransport.NewAuthFactory(), auth)
+}
+
+func (d *dispatcher) doDialTelnet(prof *profile.TelnetConfig) (transport.Stream, error) {
+	if d.dialTelnet != nil {
+		return d.dialTelnet(prof)
+	}
+	return telnettransport.Open(context.Background(), prof)
 }
 
 func badPayload(err error) *v1.ProtocolError {
@@ -151,6 +163,8 @@ func (d *dispatcher) Dispatch(role ipc.Role, req v1.Request) (any, *v1.ProtocolE
 		return d.retryUART()
 	case v1.OpRetrySSH:
 		return d.retrySSH()
+	case v1.OpRetryTelnet:
+		return d.retryTelnet()
 	case v1.OpTakeover:
 		return d.takeover()
 	case v1.OpSecretBegin:
@@ -172,7 +186,7 @@ func (d *dispatcher) portsList() (any, *v1.ProtocolError) {
 
 type sessionStartPayload struct {
 	Board     string `json:"board"`
-	Transport string `json:"transport,omitempty"` // "uart" or "ssh"; required only when a profile configures both
+	Transport string `json:"transport,omitempty"` // "uart", "ssh", or "telnet"; required only when a profile configures more than one
 
 	// SSH-only: never persisted, only ever entered interactively for
 	// this one connection attempt.
@@ -201,13 +215,25 @@ func (d *dispatcher) sessionStart(role ipc.Role, payload json.RawMessage) (any, 
 	}
 
 	kind := p.Transport
-	switch {
-	case kind == "" && prof.UART != nil && prof.SSH == nil:
-		kind = "uart"
-	case kind == "" && prof.SSH != nil && prof.UART == nil:
-		kind = "ssh"
-	case kind == "":
-		return nil, badPayload(fmt.Errorf("profile %q configures both UART and SSH; specify which transport to start", p.Board))
+	if kind == "" {
+		var configured []string
+		if prof.UART != nil {
+			configured = append(configured, "uart")
+		}
+		if prof.SSH != nil {
+			configured = append(configured, "ssh")
+		}
+		if prof.Telnet != nil {
+			configured = append(configured, "telnet")
+		}
+		switch len(configured) {
+		case 1:
+			kind = configured[0]
+		case 0:
+			return nil, badPayload(fmt.Errorf("profile %q configures no transport", p.Board))
+		default:
+			return nil, badPayload(fmt.Errorf("profile %q configures more than one transport; specify which to start", p.Board))
+		}
 	}
 
 	switch kind {
@@ -215,6 +241,8 @@ func (d *dispatcher) sessionStart(role ipc.Role, payload json.RawMessage) (any, 
 		return d.startUARTSession(prof)
 	case "ssh":
 		return d.startSSHSession(role, prof, p)
+	case "telnet":
+		return d.startTelnetSession(prof)
 	default:
 		return nil, badPayload(fmt.Errorf("unknown transport %q", kind))
 	}
@@ -242,6 +270,29 @@ func (d *dispatcher) startUARTSession(prof profile.Profile) (any, *v1.ProtocolEr
 		return nil, internalErr(err)
 	}
 	if err := d.coord.StartUART(stream, d.loginCfg, opener); err != nil {
+		stream.Close()
+		return nil, internalErr(err)
+	}
+
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) startTelnetSession(prof profile.Profile) (any, *v1.ProtocolError) {
+	if prof.Telnet == nil {
+		return nil, badPayload(fmt.Errorf("profile %q has no telnet configuration", prof.Name))
+	}
+
+	opener := func() (transport.Stream, error) {
+		return d.doDialTelnet(prof.Telnet)
+	}
+
+	stream, err := opener()
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	// telnetd lands on the board's own login, so the UART console
+	// login configuration drives authentication here too.
+	if err := d.coord.StartTelnet(stream, d.loginCfg, opener); err != nil {
 		stream.Close()
 		return nil, internalErr(err)
 	}
@@ -649,6 +700,13 @@ func (d *dispatcher) secretDone() (any, *v1.ProtocolError) {
 
 func (d *dispatcher) retryUART() (any, *v1.ProtocolError) {
 	if err := d.coord.RetryUART(); err != nil {
+		return nil, internalErr(err)
+	}
+	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil
+}
+
+func (d *dispatcher) retryTelnet() (any, *v1.ProtocolError) {
+	if err := d.coord.RetryTelnet(); err != nil {
 		return nil, internalErr(err)
 	}
 	return map[string]string{"session_id": d.coord.SessionID(), "state": string(d.coord.State())}, nil

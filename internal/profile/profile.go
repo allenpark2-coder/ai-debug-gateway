@@ -1,10 +1,12 @@
 // Package profile persists board profiles: UART line settings and a
-// stable USB identity, and/or SSH host/user/key configuration.
-// Profiles never store passwords or private-key passphrases.
+// stable USB identity, and/or SSH host/user/key configuration, and/or
+// a telnet host. Profiles never store passwords or private-key
+// passphrases.
 package profile
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -32,13 +34,38 @@ type SSHConfig struct {
 	KnownHostsFile string
 }
 
+// TelnetConfig is a profile's persistent telnet configuration. Like
+// SSHConfig it never stores a password: a telnet connection lands on
+// the board's own login process, and the console login flow supplies
+// credentials the same way a UART session does. Telnet carries no
+// encryption and no server authentication, so it is only appropriate
+// on a lab network trusted to the same degree as a physical serial
+// cable.
+type TelnetConfig struct {
+	Host string
+	// Port 0 means the well-known telnet port 23.
+	Port int
+}
+
+// Validate reports whether the configuration can identify a target.
+func (c *TelnetConfig) Validate() error {
+	if c.Host == "" {
+		return fmt.Errorf("profile: telnet host must not be empty")
+	}
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("profile: telnet port %d out of range", c.Port)
+	}
+	return nil
+}
+
 // Profile is one board's saved configuration. A board profile may
-// hold both UART and SSH configuration; starting a session still
+// hold several transports' configuration; starting a session still
 // requires the caller to pick exactly one transport.
 type Profile struct {
-	Name string
-	UART *UARTConfig
-	SSH  *SSHConfig
+	Name   string
+	UART   *UARTConfig
+	SSH    *SSHConfig
+	Telnet *TelnetConfig
 }
 
 // Save validates p and atomically writes it as 0600 JSON to
@@ -46,6 +73,11 @@ type Profile struct {
 func Save(dir string, p Profile) error {
 	if p.UART != nil {
 		if err := p.UART.Line.Validate(); err != nil {
+			return err
+		}
+	}
+	if p.Telnet != nil {
+		if err := p.Telnet.Validate(); err != nil {
 			return err
 		}
 	}

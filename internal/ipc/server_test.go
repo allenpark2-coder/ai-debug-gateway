@@ -97,7 +97,7 @@ func TestControlConnectionCannotApproveOrWriteTransport(t *testing.T) {
 	}
 	defer c.Close()
 
-	for _, op := range []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpSecretBegin, v1.OpRetryUART, v1.OpRetrySSH, v1.OpTakeover, v1.OpHostKeyAccept} {
+	for _, op := range []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpSecretBegin, v1.OpRetryUART, v1.OpRetrySSH, v1.OpRetryTelnet, v1.OpTakeover, v1.OpHostKeyAccept} {
 		resp, err := c.Call(v1.Request{Version: v1.Version, RequestID: op, Operation: op})
 		if err != nil {
 			t.Fatal(err)
@@ -164,7 +164,7 @@ func TestDiagnoseRoleCapabilityMatrix(t *testing.T) {
 
 func TestUnsafeShellRoleCapabilityMatrix(t *testing.T) {
 	allowed := []string{v1.OpSessionStatus, v1.OpOutputRead, v1.OpUnsafeShellExecute}
-	denied := []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpRetryUART, v1.OpRetrySSH,
+	denied := []string{v1.OpCommandApprove, v1.OpTransportWrite, v1.OpRetryUART, v1.OpRetrySSH, v1.OpRetryTelnet,
 		v1.OpSecretBegin, v1.OpSessionStart, v1.OpSessionEnd, v1.OpHostKeyAccept, v1.OpDiagnoseExecute}
 
 	for _, op := range allowed {

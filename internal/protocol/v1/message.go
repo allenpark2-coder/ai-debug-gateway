@@ -43,6 +43,7 @@ const (
 	OpTransportWrite = "transport.write"
 	OpRetryUART      = "retry.uart"
 	OpRetrySSH       = "retry.ssh"
+	OpRetryTelnet    = "retry.telnet"
 	OpTakeover       = "takeover"
 	OpHostKeyAccept  = "hostkey.accept"
 )

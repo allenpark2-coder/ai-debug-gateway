@@ -189,7 +189,7 @@ commands:
   version                                   print the build version and commit
   ports                                    list discovered serial ports
   profile create                           interactively create a board profile
-  start [--board NAME] [--transport uart|ssh] [--ssh-accept-host]
+  start [--board NAME] [--transport uart|ssh|telnet] [--ssh-accept-host]
                                             start a session; an SSH password is
                                             requested at a hidden interactive prompt
   status                                   report session state

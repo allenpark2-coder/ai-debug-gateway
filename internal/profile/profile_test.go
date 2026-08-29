@@ -96,3 +96,40 @@ func assertNoSecretFields(t *testing.T, typ reflect.Type) {
 		}
 	}
 }
+
+func TestTelnetConfigSaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := Profile{
+		Name:   "board-t",
+		Telnet: &TelnetConfig{Host: "board.example", Port: 23},
+	}
+	if err := Save(dir, p); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(dir, "board-t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(p, got) {
+		t.Fatalf("got %+v, want %+v", got, p)
+	}
+}
+
+func TestTelnetConfigTypeHasNoSecretFields(t *testing.T) {
+	assertNoSecretFields(t, reflect.TypeOf(TelnetConfig{}))
+}
+
+func TestSaveRejectsInvalidTelnetConfig(t *testing.T) {
+	dir := t.TempDir()
+	for _, bad := range []TelnetConfig{
+		{Host: ""},
+		{Host: "board.example", Port: -1},
+		{Host: "board.example", Port: 65536},
+	} {
+		bad := bad
+		if err := Save(dir, Profile{Name: "board-x", Telnet: &bad}); err == nil {
+			t.Fatalf("Save accepted invalid telnet config %+v", bad)
+		}
+	}
+}

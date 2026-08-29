@@ -247,6 +247,14 @@ func (c *Client) RetrySSH() (json.RawMessage, error) {
 	return out, err
 }
 
+// RetryTelnet is the human-approved telnet reconnect (attach
+// connections only).
+func (c *Client) RetryTelnet() (json.RawMessage, error) {
+	var out json.RawMessage
+	err := c.Call(v1.OpRetryTelnet, nil, &out)
+	return out, err
+}
+
 // Takeover ends the active transaction as interrupted-by-user and
 // restores manual control (attach connections only).
 func (c *Client) Takeover() (json.RawMessage, error) {
