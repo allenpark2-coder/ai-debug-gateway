@@ -19,6 +19,12 @@ func TestValidateManaged(t *testing.T) {
 		{"cat <<-EOF", false},
 		{"sleep 1 &", false},
 		{"sleep 1 & echo hi", false},
+		{"ls /nonexistent 2>&1", true},
+		{"echo warn >&2", true},
+		{"cat /var/log/messages 2>&1 | tail -3", true},
+		{"sleep 1 2>&1 &", false},
+		{"sleep 1 2>&1 & echo hi", false},
+		{"ls &> /tmp/all", false},
 		{"printf 'a\x00b'", false},
 	}
 	for _, tt := range tests {

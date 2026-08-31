@@ -64,6 +64,12 @@ func ValidateManaged(text string) error {
 				i++
 				continue
 			}
+			// ">&" / "<&" is a file-descriptor duplication (2>&1), not
+			// an async operator. A real background "&" after it, as
+			// in "cmd 2>&1 &", still lands here on its own.
+			if i > 0 && (text[i-1] == '>' || text[i-1] == '<') {
+				continue
+			}
 			return ErrBackgroundList
 		case '<':
 			if i+1 < len(text) && text[i+1] == '<' {

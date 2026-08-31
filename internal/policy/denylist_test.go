@@ -10,6 +10,8 @@ func TestDenylistPolicy(t *testing.T) {
 	}{
 		{`mount -o remount,rw /`, true},
 		{`echo hi > /tmp/x`, true},
+		{`ls /nonexistent 2>&1 | tail -3`, true}, // fd duplication is a redirect, not a background job
+		{`ls 2>&1 &`, false},
 		{`ip link set eth0 down`, true},
 		{`rm -rf /tmp/scratch`, true},
 		{`chmod 600 /tmp/x`, true},
